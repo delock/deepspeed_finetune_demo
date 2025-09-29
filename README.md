@@ -10,7 +10,7 @@ To run the example, simply run:
 ./run.sh <NUM_GPUS> <MODEL_NAME> <DS_CONFIG>
 ```
 
-For example, if we want to run Qwen2.5-3B model with ZeRO offload, we can run:
+For example, if we want to run Qwen2.5-3B model with ZeRO offload on 2 GPUs, we can run:
 ```
 ./run.sh 2 Qwen2.5-3B zo_config.json
 ```
