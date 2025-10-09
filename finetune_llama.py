@@ -66,6 +66,8 @@ def main(args):
 
     model_engine.train()
     global_step = 0
+    total_time = 0
+    total_count = 0
 
     for epoch in range(args.num_train_epochs):
         if dist.get_rank() == 0:
@@ -81,11 +83,23 @@ def main(args):
             model_engine.step()
 
             step_time = time.time() - step_start_time
+            if args.bench_start >= 0 and args.bench_steps > 0:
+                if global_step >= args.bench_start:
+                    total_time += step_time
+                    total_count += 1
+                if global_step >= args.bench_start + args.bench_steps - 1:
+                    break
             global_step += 1
             
             if dist.get_rank() == 0:  # Print every 10 steps
                 print(f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time*1000:.0f}ms")
+        if args.bench_start >= 0 and args.bench_steps > 0:
+            if global_step >= args.bench_start + args.bench_steps - 1:
+                break
 
+    if args.bench_start >= 0 and args.bench_steps > 0:
+        if dist.get_rank() == 0:
+            print (f"Average iteration time = {total_time/total_count}")
     # Save model using DeepSpeed's save_checkpoint method
     if dist.get_rank() == 0:
         model_engine.save_checkpoint(args.output_dir)
@@ -106,6 +120,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_train_epochs", type=int, default=3)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--bench_start", type=int, default=-1)
+    parser.add_argument("--bench_steps", type=int, default=100)
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
 
