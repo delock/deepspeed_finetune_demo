@@ -7,10 +7,17 @@ Currently in DeepSpeedExamples, each technology has a dedicated directory to sho
 
 To run the example, simply run:
 ```
-./run.sh <NUM_GPUS> <MODEL_NAME> <DS_CONFIG>
+./finetune.sh <NUM_GPUS> <MODEL_NAME> <DS_CONFIG>
 ```
 
 For example, if we want to run Qwen2.5-3B model with ZeRO offload on 2 GPUs, we can run:
 ```
-./run.sh 2 Qwen2.5-3B zo_config.json
+./finetune.sh 2 Qwen2.5-3B zo_config.json
+```
+
+# Benchmarking
+
+To run benchmark, run:
+```
+./benchmark.sh <NUM_GPUS> <MODEL_NAME> <DS_CONFIG>
 ```
