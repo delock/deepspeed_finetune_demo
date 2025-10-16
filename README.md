@@ -21,3 +21,18 @@ To run benchmark, run:
 ```
 ./benchmark.sh <NUM_GPUS> <MODEL_NAME> <DS_CONFIG>
 ```
+
+# Config files
+
+For quick start, some config files are added, you may also modify the config to fit your need.
+
+| Config File | Description |
+|-------------|-------------|
+| z2_config.json | ZeRO Stage 2 |
+| z3_config.json | ZeRO Stage 3 |
+| zo_config.json | ZeRO Offload, stage 2 |
+| z3o_config.json | ZeRO Offload, stage 3 |
+| zf_config.json | ZeRO Offload with ZenFlow |
+| so_config.json | ZeRO Offload with SuperOffload |
+| z2_muon.json | ZeRO 2 with Muon optimizer |
+| tp_config.json | ZeRO 2 with AutoTP |
