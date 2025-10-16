@@ -12,6 +12,7 @@ from transformers import (
 import random
 import numpy as np
 from deepspeed import comm as dist
+from tqdm import tqdm
 
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -34,18 +35,42 @@ def preprocess_alpaca(example, tokenizer, max_length=512):
     return tokenized
 
 def evaluate(model_engine, eval_dataloader):
+    import torch
+    from tqdm import tqdm
+    from deepspeed import comm as dist
+
     model_engine.eval()
     losses = []
+    total_batches = len(eval_dataloader)
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    rank = dist.get_rank() if dist.is_initialized() else 0
+
+    # Split dataloader among ranks: each rank processes a subset of batches
+    # Iterate only batches where (batch_idx % world_size) == rank
     with torch.no_grad():
-        for batch in eval_dataloader:
+        for batch_idx, batch in enumerate(tqdm(eval_dataloader, desc=f"Evaluating [rank {rank}]", leave=False)):
+            if batch_idx % world_size != rank:
+                continue
             batch = {k: v.to(model_engine.device) for k, v in batch.items()}
             outputs = model_engine(**batch)
             loss = outputs.loss
             losses.append(loss.item())
     model_engine.train()
-    if len(losses) == 0:
+
+    # Gather total loss and total count from all ranks
+    device = model_engine.device
+    local_sum = torch.tensor([sum(losses)], dtype=torch.float32, device=device)
+    local_count = torch.tensor([len(losses)], dtype=torch.float32, device=device)
+
+    if dist.is_initialized():
+        dist.all_reduce(local_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(local_count, op=dist.ReduceOp.SUM)
+
+    if local_count.item() == 0:
         return None
-    return sum(losses) / len(losses)
+
+    avg_loss = (local_sum / local_count).item()
+    return avg_loss
 
 def main(args):
     set_seed(args.seed)
@@ -120,8 +145,8 @@ def main(args):
 
             # Evaluation after every eval_steps
             if args.eval_steps > 0 and global_step % args.eval_steps == 0:
+                eval_loss = evaluate(model_engine, eval_dataloader)
                 if dist.get_rank() == 0:
-                    eval_loss = evaluate(model_engine, eval_dataloader)
                     if eval_loss is not None:
                         print(f"[Eval @ step {global_step}] Average eval loss: {eval_loss:.4f}")
 
