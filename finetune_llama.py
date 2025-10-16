@@ -12,7 +12,6 @@ from transformers import (
 import random
 import numpy as np
 from deepspeed import comm as dist
-from tqdm import tqdm
 
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -48,7 +47,11 @@ def evaluate(model_engine, eval_dataloader):
     # Split dataloader among ranks: each rank processes a subset of batches
     # Iterate only batches where (batch_idx % world_size) == rank
     with torch.no_grad():
-        for batch_idx, batch in enumerate(tqdm(eval_dataloader, desc=f"Evaluating [rank {rank}]", leave=False)):
+        if rank == 0:
+            enum = enumerate(tqdm(eval_dataloader, desc=f"Evaluating [rank {rank}]", leave=False))
+        else:
+            enum = enumerate(eval_dataloader)
+        for batch_idx, batch in enum:
             if batch_idx % world_size != rank:
                 continue
             batch = {k: v.to(model_engine.device) for k, v in batch.items()}
