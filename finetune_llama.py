@@ -33,6 +33,20 @@ def preprocess_alpaca(example, tokenizer, max_length=512):
     tokenized["labels"] = tokenized["input_ids"].copy()
     return tokenized
 
+def evaluate(model_engine, eval_dataloader):
+    model_engine.eval()
+    losses = []
+    with torch.no_grad():
+        for batch in eval_dataloader:
+            batch = {k: v.to(model_engine.device) for k, v in batch.items()}
+            outputs = model_engine(**batch)
+            loss = outputs.loss
+            losses.append(loss.item())
+    model_engine.train()
+    if len(losses) == 0:
+        return None
+    return sum(losses) / len(losses)
+
 def main(args):
     set_seed(args.seed)
 
@@ -42,17 +56,27 @@ def main(args):
 
     model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16)
 
-    # Load Alpaca 52K dataset
+    # Load Alpaca 52K dataset and split into train/eval
     dataset = load_dataset("tatsu-lab/alpaca")
+    split_dataset = dataset["train"].train_test_split(test_size=0.1, seed=args.seed)
+    train_dataset = split_dataset["train"]
+    eval_dataset = split_dataset["test"]
 
-    tokenized_dataset = dataset["train"].map(lambda x: preprocess_alpaca(x, tokenizer), batched=False)
-    
+    tokenized_train_dataset = train_dataset.map(lambda x: preprocess_alpaca(x, tokenizer), batched=False)
+    tokenized_eval_dataset = eval_dataset.map(lambda x: preprocess_alpaca(x, tokenizer), batched=False)
+
     # Create DataLoader - let DeepSpeed handle the actual batching
     train_dataloader = DataLoader(
-        tokenized_dataset,
+        tokenized_train_dataset,
         batch_size=1,  # This will be overridden by DeepSpeed config
         collate_fn=default_data_collator,
         shuffle=True
+    )
+    eval_dataloader = DataLoader(
+        tokenized_eval_dataset,
+        batch_size=1,  # small eval batch for stability
+        collate_fn=default_data_collator,
+        shuffle=False
     )
 
     # DeepSpeed will automatically parse the config file passed via --deepspeed argument
@@ -60,7 +84,7 @@ def main(args):
         args=args,
         model=model,
         model_parameters=model.parameters(),
-        training_data=tokenized_dataset,
+        training_data=tokenized_train_dataset,
         collate_fn=default_data_collator
     )
 
@@ -72,7 +96,7 @@ def main(args):
     for epoch in range(args.num_train_epochs):
         if dist.get_rank() == 0:
             print(f"Starting epoch {epoch + 1}/{args.num_train_epochs}")
-        
+
         for step, batch in enumerate(train_dataloader):
             step_start_time = time.time()
             batch = {k: v.to(model_engine.device) for k, v in batch.items()}
@@ -90,9 +114,17 @@ def main(args):
                 if global_step >= args.bench_start + args.bench_steps - 1:
                     break
             global_step += 1
-            
+
             if dist.get_rank() == 0:  # Print every 10 steps
                 print(f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time*1000:.0f}ms")
+
+            # Evaluation after every eval_steps
+            if args.eval_steps > 0 and global_step % args.eval_steps == 0:
+                if dist.get_rank() == 0:
+                    eval_loss = evaluate(model_engine, eval_dataloader)
+                    if eval_loss is not None:
+                        print(f"[Eval @ step {global_step}] Average eval loss: {eval_loss:.4f}")
+
         if args.bench_start >= 0 and args.bench_steps > 0:
             if global_step >= args.bench_start + args.bench_steps - 1:
                 break
@@ -122,6 +154,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--bench_start", type=int, default=-1)
     parser.add_argument("--bench_steps", type=int, default=100)
+    parser.add_argument("--eval_steps", type=int, default=0, help="Run evaluation every N steps (0 disables)")
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
 
