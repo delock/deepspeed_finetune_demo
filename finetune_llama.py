@@ -141,7 +141,6 @@ def main(args):
                     total_count += 1
                 if global_step >= args.bench_start + args.bench_steps - 1:
                     break
-            global_step += 1
 
             if dist.get_rank() == 0:  # Print every 10 steps
                 print(f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time*1000:.0f}ms")
@@ -152,6 +151,7 @@ def main(args):
                 if dist.get_rank() == 0:
                     if eval_loss is not None:
                         print(f"[Eval @ step {global_step}] Average eval loss: {eval_loss:.4f}")
+            global_step += 1
 
         if args.bench_start >= 0 and args.bench_steps > 0:
             if global_step >= args.bench_start + args.bench_steps - 1:
