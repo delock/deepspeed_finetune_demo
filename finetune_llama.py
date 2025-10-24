@@ -12,6 +12,7 @@ from transformers import (
 import random
 import numpy as np
 from deepspeed import comm as dist
+import logging
 
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -76,6 +77,7 @@ def evaluate(model_engine, eval_dataloader):
     return avg_loss
 
 def main(args):
+    logging.basicConfig(level=logging.INFO, filename='pytorch_log.txt')
     set_seed(args.seed)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -121,11 +123,28 @@ def main(args):
     total_time = 0
     total_count = 0
 
+    if args.profile_start >=0:
+        prof = torch.profiler.profile(
+                  activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                  record_shapes=True,
+                  profile_memory=True,
+              )
+    else:
+        prof = None
+
     for epoch in range(args.num_train_epochs):
         if dist.get_rank() == 0:
             print(f"Starting epoch {epoch + 1}/{args.num_train_epochs}")
 
         for step, batch in enumerate(train_dataloader):
+            if prof != None and global_step == args.profile_start:
+                prof.start()
+            if prof != None and global_step - args.profile_start == args.profile_steps:
+                prof.stop()
+                # print profile
+                if dist.get_rank() == 0:
+                    prof.export_chrome_trace("trace.json")
+                    print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
             step_start_time = time.time()
             batch = {k: v.to(model_engine.device) for k, v in batch.items()}
             outputs = model_engine(**batch)
@@ -142,7 +161,7 @@ def main(args):
                 if global_step >= args.bench_start + args.bench_steps - 1:
                     break
 
-            if dist.get_rank() == 0:  # Print every 10 steps
+            if dist.get_rank() == 0 and global_step%10==0:  # Print every 10 steps
                 print(f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time*1000:.0f}ms")
 
             # Evaluation after every eval_steps
@@ -152,6 +171,8 @@ def main(args):
                     if eval_loss is not None:
                         print(f"[Eval @ step {global_step}] Average eval loss: {eval_loss:.4f}")
             global_step += 1
+            if prof != None:
+                prof.step()
 
         if args.bench_start >= 0 and args.bench_steps > 0:
             if global_step >= args.bench_start + args.bench_steps - 1:
@@ -166,6 +187,7 @@ def main(args):
         tokenizer.save_pretrained(args.output_dir)
         print("Training complete!")
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, required=True)
@@ -175,6 +197,8 @@ if __name__ == "__main__":
                     help='local rank passed from distributed launcher')
     parser.add_argument("--lr", type=float, required=True)
     parser.add_argument("--batch_size", type=int, required=True)
+    parser.add_argument("--profile_start", type=int, default=-1)
+    parser.add_argument("--profile_steps", type=int, default=4)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--warmup", type=float, default=0.01)
     parser.add_argument("--num_train_epochs", type=int, default=3)
