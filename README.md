@@ -22,6 +22,13 @@ To run benchmark, run:
 ./benchmark.sh <NUM_GPUS> <MODEL_NAME> <DS_CONFIG>
 ```
 
+# Profiling
+
+To run profiling, run:
+```
+./profile.sh <NUM_GPUS> <MODEL_NAME> <DS_CONFIG>
+```
+
 # Config files
 
 For quick start, some config files are added, you may also modify the config to fit your need.
