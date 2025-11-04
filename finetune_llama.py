@@ -9,6 +9,7 @@ from transformers import (
     AutoTokenizer,
     default_data_collator
 )
+import json
 import random
 import numpy as np
 from deepspeed import comm as dist
@@ -16,6 +17,8 @@ import logging
 
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+import wandb
 
 
 def set_seed(seed):
@@ -109,13 +112,18 @@ def main(args):
         shuffle=False
     )
 
+    with open(args.deepspeed_config, "r") as f:
+        ds_config = json.load(f)
+    ds_config["train_batch_size"] = args.batch_size
+    delattr(args, "deepspeed_config")
     # DeepSpeed will automatically parse the config file passed via --deepspeed argument
     model_engine, optimizer, train_dataloader, lr_scheduler = deepspeed.initialize(
         args=args,
         model=model,
         model_parameters=model.parameters(),
         training_data=tokenized_train_dataset,
-        collate_fn=default_data_collator
+        collate_fn=default_data_collator,
+        config=ds_config
     )
 
     model_engine.train()
@@ -132,6 +140,11 @@ def main(args):
     else:
         prof = None
 
+    # setup logging
+    if args.wandb_name != None and dist.get_rank() == 0:
+        wandb.init(project="deepspeed_finetune_demo", name=args.wandb_name)
+
+    global_samples = 0
     for epoch in range(args.num_train_epochs):
         if dist.get_rank() == 0:
             print(f"Starting epoch {epoch + 1}/{args.num_train_epochs}")
@@ -152,6 +165,7 @@ def main(args):
 
             model_engine.backward(loss)
             model_engine.step()
+            global_samples += model_engine.train_batch_size()
 
             step_time = time.time() - step_start_time
             if args.bench_start >= 0 and args.bench_steps > 0:
@@ -169,6 +183,8 @@ def main(args):
                 eval_loss = evaluate(model_engine, eval_dataloader)
                 if dist.get_rank() == 0:
                     if eval_loss is not None:
+                        if args.wandb_name != None:
+                            wandb.log({"global_samples": global_samples, "loss": eval_loss})
                         print(f"[Eval @ step {global_step}] Average eval loss: {eval_loss:.4f}")
             global_step += 1
             if prof != None:
@@ -207,6 +223,7 @@ if __name__ == "__main__":
     parser.add_argument("--bench_start", type=int, default=-1)
     parser.add_argument("--bench_steps", type=int, default=100)
     parser.add_argument("--eval_steps", type=int, default=0, help="Run evaluation every N steps (0 disables)")
+    parser.add_argument("--wandb_name", type=str, default=None)
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
 

@@ -1,4 +1,5 @@
 NUM="${1:-2}"
 MODEL="${2:-Qwen/Qwen2.5-0.5B}"
 CONFIG="${3:-z2_config.json}"
-deepspeed --num_gpus=$NUM --bind_cores_to_rank finetune_llama.py --model_name $MODEL --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config $CONFIG --num_train_epochs 3 --eval_steps 100
+BATCH="${4:-8}"
+deepspeed --num_gpus=$NUM --bind_cores_to_rank finetune_llama.py --model_name $MODEL --output_dir output --lr 2e-5 --batch_size $BATCH --deepspeed_config $CONFIG --num_train_epochs 30 --eval_steps 100 --wandb_name $CONFIG-$BATCH
