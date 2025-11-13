@@ -15,6 +15,9 @@ For example, if we want to run Qwen2.5-3B model with ZeRO offload on 2 GPUs, we 
 ./finetune.sh 2 Qwen2.5-3B zo_config.json
 ```
 
+## Wandb support
+An optional `--wandb_name` can be supplied to finetune_llama.py to generate wandb graph.  But you need to modify finetune.sh manually to supply this argument.
+
 # Benchmarking
 
 To run benchmark, run:
