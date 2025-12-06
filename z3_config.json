@@ -13,9 +13,7 @@
         "weight_decay": 0.01
       }
     },
-    "gradient_accumulation_steps": 1,
     "gradient_clipping": 1.0,
     "gradient_checkpointing": true,
-    "zero_allow_untested_optimizer": true,
-    "train_micro_batch_size_per_gpu": 1
+    "zero_allow_untested_optimizer": true
 }

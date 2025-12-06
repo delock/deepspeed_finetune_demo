@@ -218,13 +218,15 @@ def main(args):
     model.enable_input_require_grads()
 
     # Load Alpaca 52K dataset and split into train/eval
-    dataset = load_dataset("tatsu-lab/alpaca")
+    #dataset = load_dataset("tatsu-lab/alpaca")
+    # Load the codealpaca dataset
+    dataset = load_dataset("theblackcat102/evol-codealpaca-v1")
     split_dataset = dataset["train"].train_test_split(test_size=0.01, seed=args.seed)
     #train_dataset = split_dataset["train"]
-    split_dataset2 = split_dataset["train"].train_test_split(test_size=0.1, seed=args.seed)
-    split_dataset3 = split_dataset2["train"].train_test_split(test_size=0.9, seed=args.seed)
+    split_dataset2 = split_dataset["train"].train_test_split(test_size=0.01, seed=args.seed)
+    #split_dataset3 = split_dataset2["train"].train_test_split(test_size=0.9, seed=args.seed)
     eval_dataset = split_dataset["test"]
-    train_dataset = split_dataset3["train"]
+    train_dataset = split_dataset2["train"]
     test_dataset = split_dataset2["test"]
 
     tokenized_train_dataset = train_dataset.map(lambda x: preprocess_alpaca(x, tokenizer), batched=False)
@@ -296,17 +298,17 @@ def main(args):
 
     global_samples = 0
     # check accuracy before training
-    eval_loss, eval_accuracy = evaluate(model_engine, eval_dataloader, calc_accuracy=args.calc_accuracy)
-    if args.wandb_name != None:
-        wandb.log({"global_samples": 0, "loss": eval_loss})
-    if eval_accuracy is not None:
-        if args.wandb_name != None:
-            wandb.log({"global_samples": 0, "accuracy": eval_accuracy})
-        if dist.get_rank() == 0:
-            print(f"[Eval @ step before train] Average eval loss: {eval_loss:.4f}, Accuracy: {eval_accuracy:.4f}")
-    else:
-        if dist.get_rank() == 0:
-            print(f"[Eval @ step before train] Average eval loss: {eval_loss:.4f}")
+    #eval_loss, eval_accuracy = evaluate(model_engine, eval_dataloader, calc_accuracy=args.calc_accuracy)
+    #if args.wandb_name != None:
+        #wandb.log({"global_samples": 0, "loss": eval_loss})
+    #if eval_accuracy is not None:
+        #if args.wandb_name != None:
+            #wandb.log({"global_samples": 0, "accuracy": eval_accuracy})
+        #if dist.get_rank() == 0:
+            #print(f"[Eval @ step before train] Average eval loss: {eval_loss:.4f}, Accuracy: {eval_accuracy:.4f}")
+    #else:
+        #if dist.get_rank() == 0:
+            #print(f"[Eval @ step before train] Average eval loss: {eval_loss:.4f}")
     #for epoch in range(args.num_train_epochs):
     epoch = 1
     while True:
@@ -344,31 +346,38 @@ def main(args):
                 print(f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time*1000:.0f}ms")
 
             # Evaluation after every eval_steps
-            if args.eval_steps > 0 and global_step % args.eval_steps == 0:
-                eval_loss, eval_accuracy = evaluate(model_engine, eval_dataloader, calc_accuracy=args.calc_accuracy)
-                if dist.get_rank() == 0:
-                    if eval_loss is not None:
-                        if args.wandb_name != None:
-                            wandb.log({"global_samples": global_samples, "loss": eval_loss})
-                        if eval_accuracy is not None:
-                            if args.wandb_name != None:
-                                wandb.log({"global_samples": global_samples, "accuracy": eval_accuracy})
-                            print(f"[Eval @ step {global_step}] Average eval loss: {eval_loss:.4f}, Accuracy: {eval_accuracy:.4f}")
-                        else:
-                            print(f"[Eval @ step {global_step}] Average eval loss: {eval_loss:.4f}")
+            #if args.eval_steps > 0 and global_step % args.eval_steps == 0 and global_step !=0:
+                #eval_loss, eval_accuracy = evaluate(model_engine, eval_dataloader, calc_accuracy=args.calc_accuracy)
+                #if dist.get_rank() == 0:
+                    #if eval_loss is not None:
+                        #if args.wandb_name != None:
+                            #wandb.log({"global_samples": global_samples, "loss": eval_loss})
+                        #if eval_accuracy is not None:
+                            #if args.wandb_name != None:
+                                #wandb.log({"global_samples": global_samples, "accuracy": eval_accuracy})
+                            #print(f"[Eval @ step {global_step}] Average eval loss: {eval_loss:.4f}, Accuracy: {eval_accuracy:.4f}")
+                        #else:
+                            #print(f"[Eval @ step {global_step}] Average eval loss: {eval_loss:.4f}")
             global_step += 1
             if prof != None:
                 prof.step()
+            if global_samples >= args.num_train_samples:
+                break
 
         if args.bench_start >= 0 and args.bench_steps > 0:
             if global_step >= args.bench_start + args.bench_steps - 1:
                 break
-        if global_samples > args.num_train_samples:
+        if global_samples >= args.num_train_samples:
                 break
 
     if args.bench_start >= 0 and args.bench_steps > 0:
         if dist.get_rank() == 0:
             print (f"Average iteration time = {total_time/total_count}")
+
+    # Save model using DeepSpeed's save_checkpoint method
+    model_engine.save_checkpoint(f"{args.output_dir}{dist.get_rank()}")
+    tokenizer.save_pretrained(f"{args.output_dir}{dist.get_rank()}")
+    print("Model saved.")
 
     # Calculate final accuracy after training
     if args.calc_accuracy:
@@ -377,15 +386,9 @@ def main(args):
         final_accuracy = calculate_accuracy(model_engine, test_dataloader)  # Limit batches for speed
         if dist.get_rank() == 0:
             print(f"Final accuracy after training: {final_accuracy:.4f}")
-
-        if 'baseline_accuracy' in locals():
-            print(f"Accuracy improvement: {final_accuracy - baseline_accuracy:.4f}")
-
-    # Save model using DeepSpeed's save_checkpoint method
-    if dist.get_rank() == 0:
-        model_engine.save_checkpoint(args.output_dir)
-        tokenizer.save_pretrained(args.output_dir)
-        print("Training complete!")
+#
+        #if 'baseline_accuracy' in locals():
+            #print(f"Accuracy improvement: {final_accuracy - baseline_accuracy:.4f}")
 
 
 if __name__ == "__main__":
