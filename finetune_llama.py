@@ -79,6 +79,10 @@ def evaluate(model_engine, eval_dataloader):
     avg_loss = (local_sum / local_count).item()
     return avg_loss
 
+def print_r(rank, arg):
+    if rank == dist.get_rank():
+        print(arg)
+
 def main(args):
     logging.basicConfig(level=logging.INFO, filename='pytorch_log.txt')
     set_seed(args.seed)
@@ -131,6 +135,13 @@ def main(args):
     total_time = 0
     total_count = 0
 
+    # skip unnecessary evaluation
+    save_checkpoint_p = True
+    if args.bench_start >= 0 and args.bench_steps > 0:
+        save_checkpoint_p = False
+    if args.profile_start >= 0:
+        save_checkpoint_p = False
+
     if args.profile_start >=0:
         prof = torch.profiler.profile(
                   activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
@@ -146,8 +157,7 @@ def main(args):
 
     global_samples = 0
     for epoch in range(args.num_train_epochs):
-        if dist.get_rank() == 0:
-            print(f"Starting epoch {epoch + 1}/{args.num_train_epochs}")
+        print_r(0, f"Starting epoch {epoch + 1}/{args.num_train_epochs}")
 
         for step, batch in enumerate(train_dataloader):
             if prof != None and global_step == args.profile_start:
@@ -175,11 +185,11 @@ def main(args):
                 if global_step >= args.bench_start + args.bench_steps - 1:
                     break
 
-            if dist.get_rank() == 0 and global_step%10==0:  # Print every 10 steps
-                print(f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time*1000:.0f}ms")
+            if global_step%10==0:  # Print every 10 steps
+                print_r(0, f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time*1000:.0f}ms")
 
             # Evaluation after every eval_steps
-            if args.eval_steps > 0 and global_step % args.eval_steps == 0:
+            if args.eval_steps > 0 and global_step % args.eval_steps == 0 and save_checkpoint_p:
                 eval_loss = evaluate(model_engine, eval_dataloader)
                 if dist.get_rank() == 0:
                     if eval_loss is not None:
@@ -195,13 +205,17 @@ def main(args):
                 break
 
     if args.bench_start >= 0 and args.bench_steps > 0:
-        if dist.get_rank() == 0:
-            print (f"Average iteration time = {total_time/total_count}")
-    # Save model using DeepSpeed's save_checkpoint method
-    if dist.get_rank() == 0:
-        model_engine.save_checkpoint(args.output_dir)
-        tokenizer.save_pretrained(args.output_dir)
-        print("Training complete!")
+        print_r (f"Average iteration time = {total_time/total_count}")
+
+    if save_checkpoint_p:
+        # Save model using DeepSpeed's save_checkpoint method
+        # on zero3, it is necessary for each rank to save the checkpoint
+        # for other stage, we just save on all ranks anyway
+        output_dir_rank = os.path.join(args.output_dir, f"{dist.get_rank()}")
+        model_engine.save_checkpoint(output_dir_rank)
+        tokenizer.save_pretrained(output_dir_rank)
+
+    print_r("Training complete!")
 
 
 if __name__ == "__main__":
