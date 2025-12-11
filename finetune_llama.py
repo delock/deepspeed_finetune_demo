@@ -94,7 +94,7 @@ def main(args):
     model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16)
 
     # Load Alpaca 52K dataset and split into train/eval
-    dataset = load_dataset("tatsu-lab/alpaca")
+    dataset = load_dataset(args.dataset_name)
     split_dataset = dataset["train"].train_test_split(test_size=0.1, seed=args.seed)
     train_dataset = split_dataset["train"]
     eval_dataset = split_dataset["test"]
@@ -205,7 +205,7 @@ def main(args):
                 break
 
     if args.bench_start >= 0 and args.bench_steps > 0:
-        print_r (f"Average iteration time = {total_time/total_count}")
+        print_r (0, f"Average iteration time = {total_time/total_count}")
 
     if save_checkpoint_p:
         # Save model using DeepSpeed's save_checkpoint method
@@ -215,12 +215,13 @@ def main(args):
         model_engine.save_checkpoint(output_dir_rank)
         tokenizer.save_pretrained(output_dir_rank)
 
-    print_r("Training complete!")
+    print_r(0, "Training complete!")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, required=True)
+    parser.add_argument("--dataset_name", type=str, default="tatsu-lab/alpaca")
     parser.add_argument('--local_rank',
                     type=int,
                     default=-1,
