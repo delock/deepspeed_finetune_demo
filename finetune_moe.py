@@ -10,6 +10,9 @@ from transformers import (
     AutoConfig,
     default_data_collator
 )
+from transformers.integrations.deepspeed import (
+    HfDeepSpeedConfig
+)
 import json
 import random
 import numpy as np
@@ -191,6 +194,14 @@ def main(args):
     logging.basicConfig(level=logging.INFO, filename='pytorch_log.txt')
     set_seed(args.seed)
 
+    # override batch size in ds_config
+    with open(args.deepspeed_config, "r") as f:
+        ds_config = json.load(f)
+    ds_config["train_batch_size"] = args.batch_size
+    delattr(args, "deepspeed_config")
+
+    dschf=HfDeepSpeedConfig(ds_config)
+
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -253,10 +264,6 @@ def main(args):
         shuffle=False
     )
 
-    with open(args.deepspeed_config, "r") as f:
-        ds_config = json.load(f)
-    ds_config["train_batch_size"] = args.batch_size
-    delattr(args, "deepspeed_config")
     # DeepSpeed will automatically parse the config file passed via --deepspeed argument
     model_engine, optimizer, train_dataloader, lr_scheduler = deepspeed.initialize(
         args=args,
