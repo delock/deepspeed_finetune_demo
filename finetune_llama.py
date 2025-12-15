@@ -103,6 +103,25 @@ def main(args):
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16)
+    model.gradient_checkpointing_enable()
+
+    '''
+    # the code below allows you to train only part of the parameters
+    # we haven't parameterize this part yet, so uncomment down below and modify the code manually
+
+    # Freeze all parameters except gate parameters BEFORE DeepSpeed initialization
+    # This needs to be done before passing to DeepSpeed
+    for name, param in model.named_parameters():
+        if 'gate' in name.lower() and not 'gate_proj' in name.lower():
+            param.requires_grad = True
+            print(f"Unfrozen parameter: {name}")
+        else:
+            param.requires_grad = False
+
+    # Enable input gradient requirements to ensure gradient flow
+    # This is needed when using gradient checkpointing with partially frozen models
+    model.enable_input_require_grads()
+    '''
 
     # Load Alpaca 52K dataset and split into train/eval
     dataset = load_dataset(args.dataset_name)
