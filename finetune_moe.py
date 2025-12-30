@@ -33,6 +33,7 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 def preprocess_alpaca(example, tokenizer, max_length=512):
+    print (example)
     prompt = f"### Instruction:\n{example['instruction']}\n\n"
     if example.get("input", ""):
         prompt += f"### Input:\n{example['input']}\n\n"
@@ -231,10 +232,15 @@ def main(args):
     # Load Alpaca 52K dataset and split into train/eval
     #dataset = load_dataset("tatsu-lab/alpaca")
     # Load the codealpaca dataset
-    dataset = load_dataset("theblackcat102/evol-codealpaca-v1")
-    split_dataset = dataset["train"].train_test_split(test_size=0.01, seed=args.seed)
+    #dataset = load_dataset("theblackcat102/evol-codealpaca-v1")
+    # Load the human eval dataset
+    dataset = load_dataset("openai/openai_humaneval")
+    key = "train"
+    if not key in dataset:
+        key = "test"
+    split_dataset = dataset[key].train_test_split(test_size=0.2, seed=args.seed)
     #train_dataset = split_dataset["train"]
-    split_dataset2 = split_dataset["train"].train_test_split(test_size=0.01, seed=args.seed)
+    split_dataset2 = split_dataset["train"].train_test_split(test_size=0.2, seed=args.seed)
     #split_dataset3 = split_dataset2["train"].train_test_split(test_size=0.9, seed=args.seed)
     eval_dataset = split_dataset["test"]
     train_dataset = split_dataset2["train"]
