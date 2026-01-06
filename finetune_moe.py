@@ -19,6 +19,9 @@ import numpy as np
 from deepspeed import comm as dist
 import logging
 
+from nltk.translate.bleu_score import sentence_bleu, corpus_bleu, SmoothingFunction
+
+
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -33,7 +36,6 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 def preprocess_alpaca(example, tokenizer, max_length=512):
-    print (example)
     prompt = f"### Instruction:\n{example['instruction']}\n\n"
     if example.get("input", ""):
         prompt += f"### Input:\n{example['input']}\n\n"
@@ -42,7 +44,7 @@ def preprocess_alpaca(example, tokenizer, max_length=512):
     tokenized["labels"] = tokenized["input_ids"].copy()
     return tokenized
 
-def calculate_accuracy(model_engine, eval_dataloader):
+def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
     """
     Calculate accuracy by comparing model predictions with true labels.
     Accuracy is computed as the percentage of correctly predicted tokens.
@@ -65,12 +67,14 @@ def calculate_accuracy(model_engine, eval_dataloader):
         else:
             enum = enumerate(eval_dataloader)
 
+        all_predictions = []
+        all_references = []
         for batch_idx, batch in enum:
-            if batch_idx % world_size != rank:
-                continue
+            #if batch_idx % world_size != rank:
+                #continue
             # in zero stage 3, you need other rank to participate to continue inference
-            if batch_idx >= len(eval_dataloader) - (len(eval_dataloader) % world_size):
-                continue
+            #if batch_idx >= len(eval_dataloader) - (len(eval_dataloader) % world_size):
+                #continue
 
             batch = {k: v.to(model_engine.device) for k, v in batch.items()}
 
@@ -84,6 +88,11 @@ def calculate_accuracy(model_engine, eval_dataloader):
             # Get labels (ignore padding tokens - typically -100)
             labels = batch["labels"]
 
+            assert (len(predictions)==len(labels))
+            for i in range(len(predictions)):
+                all_predictions.append(predictions[i])
+                all_references.append(labels[i])
+
             # Create mask for non-padding tokens
             mask = labels != -100  # -100 is typically used for ignored tokens in labels
 
@@ -93,6 +102,29 @@ def calculate_accuracy(model_engine, eval_dataloader):
             total_tokens += mask.sum().item()
 
             processed_batches += 1
+
+            # 先把张量搬到 CPU 并转成纯 Python 列表
+        pred_ids = [p.detach().cpu().tolist() for p in all_predictions]  # List[List[int]]
+
+        # 如果 label 是字符串，就可以跳过 decode
+        label_ids = [p.detach().cpu().tolist() for p in all_references]  # List[List[int]]
+
+        # 用 tokenizer 批量 decode 成字符串
+        # 注意：skip_special_tokens=True 可以去掉 <pad>, <bos>, <eos> 等特殊符号
+        pred_texts = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+        ref_texts  = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+
+        # 如果每个样本有多个参考答案，组织成 List[List[str]] 的结构；否则也可以单参考：
+        references = [[r] for r in ref_texts]  # 单参考
+        predictions = pred_texts
+
+        preds_tok = [p.split() for p in predictions]
+        refs_tok = [[r.split() for r in ref_group] for ref_group in references]
+
+        corpus_bleu_4 = corpus_bleu(refs_tok, preds_tok, weights=(0.25, 0.25, 0.25, 0.25))
+        print(f"Corpus BLEU-4: {corpus_bleu_4:.4f}")
+
+
 
     model_engine.train()
 
@@ -230,17 +262,12 @@ def main(args):
     model.enable_input_require_grads()
 
     # Load Alpaca 52K dataset and split into train/eval
-    #dataset = load_dataset("tatsu-lab/alpaca")
+    dataset = load_dataset("tatsu-lab/alpaca")
     # Load the codealpaca dataset
     #dataset = load_dataset("theblackcat102/evol-codealpaca-v1")
-    # Load the human eval dataset
-    dataset = load_dataset("openai/openai_humaneval")
-    key = "train"
-    if not key in dataset:
-        key = "test"
-    split_dataset = dataset[key].train_test_split(test_size=0.2, seed=args.seed)
+    split_dataset = dataset["train"].train_test_split(test_size=0.01, seed=args.seed)
     #train_dataset = split_dataset["train"]
-    split_dataset2 = split_dataset["train"].train_test_split(test_size=0.2, seed=args.seed)
+    split_dataset2 = split_dataset["train"].train_test_split(test_size=0.01, seed=args.seed)
     #split_dataset3 = split_dataset2["train"].train_test_split(test_size=0.9, seed=args.seed)
     eval_dataset = split_dataset["test"]
     train_dataset = split_dataset2["train"]
@@ -284,12 +311,12 @@ def main(args):
     print (model)
 
     # Calculate baseline accuracy before training
-    #if args.calc_accuracy and dist.get_rank() == 0:
-        #if dist.get_rank() == 0:
-            #print("Calculating baseline accuracy before training...")
-        #baseline_accuracy = calculate_accuracy(model_engine, test_dataloader)  # Limit batches for speed
-        #if dist.get_rank() == 0:
-            #print(f"Baseline accuracy before training: {baseline_accuracy:.4f}")
+    if args.calc_accuracy:
+        if dist.get_rank() == 0:
+            print("Calculating baseline accuracy before training...")
+        baseline_accuracy = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
+        if dist.get_rank() == 0:
+            print(f"Baseline accuracy before training: {baseline_accuracy:.4f}")
 
     model_engine.train()
     global_step = 0
@@ -396,7 +423,7 @@ def main(args):
     if args.calc_accuracy:
         if dist.get_rank() == 0:
             print("Calculating final accuracy after training...")
-        final_accuracy = calculate_accuracy(model_engine, test_dataloader)  # Limit batches for speed
+        final_accuracy = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
         if dist.get_rank() == 0:
             print(f"Final accuracy after training: {final_accuracy:.4f}")
 #
