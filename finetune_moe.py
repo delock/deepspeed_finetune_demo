@@ -36,177 +36,177 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def analyze_gate_outputs(model_engine, eval_dataloader, tokenizer, step_name="before_training"):
-    """
-    Analyze the gate outputs of the MoE model.
-
-    Args:
-        model_engine: The DeepSpeed model engine
-        eval_dataloader: Dataloader for evaluation data
-        tokenizer: Tokenizer for processing text
-        step_name: Name to identify the analysis step (e.g., 'before_training', 'after_training')
-
-    Returns:
-        Dictionary containing analysis results
-    """
-    import torch
-    from tqdm import tqdm
-    from deepspeed import comm as dist
-
-    # Dictionary to store gate outputs
-    gate_outputs = {}
-
-    # Find all modules with 'gate' in their name and register hooks to capture their outputs
-    def register_gate_hooks(model):
-        hooks_registered = []
-        for name, module in model.named_modules():
-            if 'gate' in name.lower() and not 'gate_proj' in name.lower():
-                def make_hook(n):
-                    def hook_fn(module, input, output):
-                        # Store the output of the gate layer
-                        if n not in gate_outputs:
-                            gate_outputs[n] = []
-                        # Detach from computation graph and move to CPU for storage
-                        if isinstance(output, torch.Tensor):
-                            gate_outputs[n].append(output.detach().cpu())
-                        elif isinstance(output, tuple):
-                            # If output is a tuple (like from some activation functions), take the first tensor
-                            if len(output) > 0 and isinstance(output[0], torch.Tensor):
-                                gate_outputs[n].append(output[0].detach().cpu())
-                    return hook_fn
-
-                hook = module.register_forward_hook(make_hook(name))
-                hooks_registered.append((name, hook))
-        return hooks_registered
-
-    # Store original training state
-    was_training = model_engine.training
-
-    # Register hooks only during analysis
-    model_to_analyze = model_engine.module if hasattr(model_engine, 'module') else model_engine
-    registered_hooks = register_gate_hooks(model_to_analyze)
-
-    try:
-        model_engine.eval()
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-        rank = dist.get_rank() if dist.is_initialized() else 0
-
-        with torch.no_grad():
-            # Process a few batches to collect gate outputs
-            for batch_idx, batch in enumerate(tqdm(eval_dataloader, desc=f"Collecting gate outputs [{step_name}]") if rank == 0 else eval_dataloader):
-                if batch_idx >= 5:  # Limit to first 5 batches to reduce impact on performance
-                    break
-                if batch_idx % world_size != rank:
-                    continue
-
-                batch = {k: v.to(model_engine.device) for k, v in batch.items()}
-                outputs = model_engine(**batch)
-                # We only need the forward pass to trigger the hooks, not the output
-    finally:
-        # Remove hooks immediately after analysis - ensure they're always removed
-        for name, hook in registered_hooks:
-            hook.remove()
-
-        # Restore original training state
-        if was_training:
-            model_engine.train()
-
-    # Analyze the collected gate outputs
-    analysis_results = {}
-
-    for gate_name, outputs_list in gate_outputs.items():
-        if len(outputs_list) == 0:
-            continue
-
-        # Concatenate all outputs for this gate
-        all_outputs = torch.cat(outputs_list, dim=0)
-
-        # Calculate statistics
-        mean_output = all_outputs.mean().item()
-        std_output = all_outputs.std().item()
-        min_output = all_outputs.min().item()
-        max_output = all_outputs.max().item()
-
-        # Calculate activation statistics
-        num_total_elements = all_outputs.numel()
-        num_activated = (all_outputs != 0).sum().item()
-        activation_ratio = num_activated / num_total_elements if num_total_elements > 0 else 0
-
-        analysis_results[gate_name] = {
-            'mean': mean_output,
-            'std': std_output,
-            'min': min_output,
-            'max': max_output,
-            'activation_ratio': activation_ratio,
-            'shape': list(all_outputs.shape)
-        }
-
-    # Clear the gate_outputs to free memory
-    gate_outputs.clear()
-
-    # Print summary
-    if rank == 0:
-        print(f"\n=== Gate Output Analysis - {step_name} ===")
-        for gate_name, stats in analysis_results.items():
-            print(f"Gate: {gate_name}")
-            print(f"  Shape: {stats['shape']}")
-            print(f"  Mean: {stats['mean']:.6f}")
-            print(f"  Std: {stats['std']:.6f}")
-            print(f"  Min: {stats['min']:.6f}")
-            print(f"  Max: {stats['max']:.6f}")
-            print(f"  Activation Ratio: {stats['activation_ratio']:.6f}")
-            print()
-
-    return analysis_results
-
-
-def compare_gate_analysis(before_results, after_results):
-    """
-    Compare gate analysis results before and after fine-tuning.
-
-    Args:
-        before_results: Analysis results from before fine-tuning
-        after_results: Analysis results from after fine-tuning
-
-    Returns:
-        Dictionary with comparison results
-    """
-    from deepspeed import comm as dist
-
-    rank = dist.get_rank() if dist.is_initialized() else 0
-
-    comparison_results = {}
-
-    # Find common gate names in both results
-    common_gates = set(before_results.keys()) & set(after_results.keys())
-
-    for gate_name in common_gates:
-        before_stats = before_results[gate_name]
-        after_stats = after_results[gate_name]
-
-        comparison_results[gate_name] = {
-            'mean_change': after_stats['mean'] - before_stats['mean'],
-            'std_change': after_stats['std'] - before_stats['std'],
-            'min_change': after_stats['min'] - before_stats['min'],
-            'max_change': after_stats['max'] - before_stats['max'],
-            'activation_ratio_change': after_stats['activation_ratio'] - before_stats['activation_ratio'],
-            'before': before_stats,
-            'after': after_stats
-        }
-
-    # Print comparison summary
-    if rank == 0:
-        print("\n=== Gate Output Changes After Fine-tuning ===")
-        for gate_name, comparison in comparison_results.items():
-            print(f"Gate: {gate_name}")
-            print(f"  Mean Change: {comparison['mean_change']:.6f}")
-            print(f"  Std Change: {comparison['std_change']:.6f}")
-            print(f"  Min Change: {comparison['min_change']:.6f}")
-            print(f"  Max Change: {comparison['max_change']:.6f}")
-            print(f"  Activation Ratio Change: {comparison['activation_ratio_change']:.6f}")
-            print()
-
-    return comparison_results
+# def analyze_gate_outputs(model_engine, eval_dataloader, tokenizer, step_name="before_training"):
+#     """
+#     Analyze the gate outputs of the MoE model.
+#
+#     Args:
+#         model_engine: The DeepSpeed model engine
+#         eval_dataloader: Dataloader for evaluation data
+#         tokenizer: Tokenizer for processing text
+#         step_name: Name to identify the analysis step (e.g., 'before_training', 'after_training')
+#
+#     Returns:
+#         Dictionary containing analysis results
+#     """
+#     import torch
+#     from tqdm import tqdm
+#     from deepspeed import comm as dist
+#
+#     # Dictionary to store gate outputs
+#     gate_outputs = {}
+#
+#     # Find all modules with 'gate' in their name and register hooks to capture their outputs
+#     def register_gate_hooks(model):
+#         hooks_registered = []
+#         for name, module in model.named_modules():
+#             if 'gate' in name.lower() and not 'gate_proj' in name.lower():
+#                 def make_hook(n):
+#                     def hook_fn(module, input, output):
+#                         # Store the output of the gate layer
+#                         if n not in gate_outputs:
+#                             gate_outputs[n] = []
+#                         # Detach from computation graph and move to CPU for storage
+#                         if isinstance(output, torch.Tensor):
+#                             gate_outputs[n].append(output.detach().cpu())
+#                         elif isinstance(output, tuple):
+#                             # If output is a tuple (like from some activation functions), take the first tensor
+#                             if len(output) > 0 and isinstance(output[0], torch.Tensor):
+#                                 gate_outputs[n].append(output[0].detach().cpu())
+#                     return hook_fn
+#
+#                 hook = module.register_forward_hook(make_hook(name))
+#                 hooks_registered.append((name, hook))
+#         return hooks_registered
+#
+#     # Store original training state
+#     was_training = model_engine.training
+#
+#     # Register hooks only during analysis
+#     model_to_analyze = model_engine.module if hasattr(model_engine, 'module') else model_engine
+#     registered_hooks = register_gate_hooks(model_to_analyze)
+#
+#     try:
+#         model_engine.eval()
+#         world_size = dist.get_world_size() if dist.is_initialized() else 1
+#         rank = dist.get_rank() if dist.is_initialized() else 0
+#
+#         with torch.no_grad():
+#             # Process a few batches to collect gate outputs
+#             for batch_idx, batch in enumerate(tqdm(eval_dataloader, desc=f"Collecting gate outputs [{step_name}]") if rank == 0 else eval_dataloader):
+#                 if batch_idx >= 5:  # Limit to first 5 batches to reduce impact on performance
+#                     break
+#                 if batch_idx % world_size != rank:
+#                     continue
+#
+#                 batch = {k: v.to(model_engine.device) for k, v in batch.items()}
+#                 outputs = model_engine(**batch)
+#                 # We only need the forward pass to trigger the hooks, not the output
+#     finally:
+#         # Remove hooks immediately after analysis - ensure they're always removed
+#         for name, hook in registered_hooks:
+#             hook.remove()
+#
+#         # Restore original training state
+#         if was_training:
+#             model_engine.train()
+#
+#     # Analyze the collected gate outputs
+#     analysis_results = {}
+#
+#     for gate_name, outputs_list in gate_outputs.items():
+#         if len(outputs_list) == 0:
+#             continue
+#
+#         # Concatenate all outputs for this gate
+#         all_outputs = torch.cat(outputs_list, dim=0)
+#
+#         # Calculate statistics
+#         mean_output = all_outputs.mean().item()
+#         std_output = all_outputs.std().item()
+#         min_output = all_outputs.min().item()
+#         max_output = all_outputs.max().item()
+#
+#         # Calculate activation statistics
+#         num_total_elements = all_outputs.numel()
+#         num_activated = (all_outputs != 0).sum().item()
+#         activation_ratio = num_activated / num_total_elements if num_total_elements > 0 else 0
+#
+#         analysis_results[gate_name] = {
+#             'mean': mean_output,
+#             'std': std_output,
+#             'min': min_output,
+#             'max': max_output,
+#             'activation_ratio': activation_ratio,
+#             'shape': list(all_outputs.shape)
+#         }
+#
+#     # Clear the gate_outputs to free memory
+#     gate_outputs.clear()
+#
+#     # Print summary
+#     if rank == 0:
+#         print(f"\n=== Gate Output Analysis - {step_name} ===")
+#         for gate_name, stats in analysis_results.items():
+#             print(f"Gate: {gate_name}")
+#             print(f"  Shape: {stats['shape']}")
+#             print(f"  Mean: {stats['mean']:.6f}")
+#             print(f"  Std: {stats['std']:.6f}")
+#             print(f"  Min: {stats['min']:.6f}")
+#             print(f"  Max: {stats['max']:.6f}")
+#             print(f"  Activation Ratio: {stats['activation_ratio']:.6f}")
+#             print()
+#
+#     return analysis_results
+#
+#
+# def compare_gate_analysis(before_results, after_results):
+#     """
+#     Compare gate analysis results before and after fine-tuning.
+#
+#     Args:
+#         before_results: Analysis results from before fine-tuning
+#         after_results: Analysis results from after fine-tuning
+#
+#     Returns:
+#         Dictionary with comparison results
+#     """
+#     from deepspeed import comm as dist
+#
+#     rank = dist.get_rank() if dist.is_initialized() else 0
+#
+#     comparison_results = {}
+#
+#     # Find common gate names in both results
+#     common_gates = set(before_results.keys()) & set(after_results.keys())
+#
+#     for gate_name in common_gates:
+#         before_stats = before_results[gate_name]
+#         after_stats = after_results[gate_name]
+#
+#         comparison_results[gate_name] = {
+#             'mean_change': after_stats['mean'] - before_stats['mean'],
+#             'std_change': after_stats['std'] - before_stats['std'],
+#             'min_change': after_stats['min'] - before_stats['min'],
+#             'max_change': after_stats['max'] - before_stats['max'],
+#             'activation_ratio_change': after_stats['activation_ratio'] - before_stats['activation_ratio'],
+#             'before': before_stats,
+#             'after': after_stats
+#         }
+#
+#     # Print comparison summary
+#     if rank == 0:
+#         print("\n=== Gate Output Changes After Fine-tuning ===")
+#         for gate_name, comparison in comparison_results.items():
+#             print(f"Gate: {gate_name}")
+#             print(f"  Mean Change: {comparison['mean_change']:.6f}")
+#             print(f"  Std Change: {comparison['std_change']:.6f}")
+#             print(f"  Min Change: {comparison['min_change']:.6f}")
+#             print(f"  Max Change: {comparison['max_change']:.6f}")
+#             print(f"  Activation Ratio Change: {comparison['activation_ratio_change']:.6f}")
+#             print()
+#
+#     return comparison_results
 
 
 
@@ -494,9 +494,9 @@ def main(args):
             print(f"Baseline accuracy before training: {baseline_accuracy:.4f}")
 
     # Perform gate output analysis before fine-tuning
-    if dist.get_rank() == 0:
-        print("Performing gate output analysis before fine-tuning...")
-    gate_analysis_before = analyze_gate_outputs(model_engine, test_dataloader, tokenizer, step_name="before_training")
+    # if dist.get_rank() == 0:
+    #     print("Performing gate output analysis before fine-tuning...")
+    # gate_analysis_before = analyze_gate_outputs(model_engine, test_dataloader, tokenizer, step_name="before_training")
 
     model_engine.train()
     global_step = 0
@@ -595,14 +595,14 @@ def main(args):
             print (f"Average iteration time = {total_time/total_count}")
 
     # Perform gate output analysis after fine-tuning
-    if dist.get_rank() == 0:
-        print("Performing gate output analysis after fine-tuning...")
-    gate_analysis_after = analyze_gate_outputs(model_engine, test_dataloader, tokenizer, step_name="after_training")
+    # if dist.get_rank() == 0:
+    #     print("Performing gate output analysis after fine-tuning...")
+    # gate_analysis_after = analyze_gate_outputs(model_engine, test_dataloader, tokenizer, step_name="after_training")
 
     # Compare gate analysis results
-    if dist.get_rank() == 0:
-        print("Comparing gate output changes...")
-    gate_comparison = compare_gate_analysis(gate_analysis_before, gate_analysis_after)
+    # if dist.get_rank() == 0:
+    #     print("Comparing gate output changes...")
+    # gate_comparison = compare_gate_analysis(gate_analysis_before, gate_analysis_after)
 
     # Save model using DeepSpeed's save_checkpoint method
     model_engine.save_checkpoint(f"{args.output_dir}{dist.get_rank()}")
