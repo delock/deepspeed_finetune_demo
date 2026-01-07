@@ -209,6 +209,140 @@ def set_seed(seed):
 #     return comparison_results
 
 
+def sample_test_examples(test_dataset, tokenizer, num_samples=10, seed=42):
+    """
+    Sample random examples from test dataset for comparison.
+
+    Args:
+        test_dataset: The test dataset
+        tokenizer: The tokenizer
+        num_samples: Number of samples to take (default 10)
+        seed: Random seed for reproducibility
+
+    Returns:
+        List of dictionaries containing input text and labels
+    """
+    import random
+    random.seed(seed)
+
+    # Randomly sample indices
+    sampled_indices = random.sample(range(len(test_dataset)), num_samples)
+
+    samples = []
+    for idx in sampled_indices:
+        example = test_dataset[idx]
+
+        # Reconstruct the input text from the example
+        prompt = f"### Instruction:\n{example['instruction']}\n\n"
+        if example.get("input", ""):
+            prompt += f"### Input:\n{example['input']}\n\n"
+        prompt += f"### Response:\n"
+
+        # Get the full response (ground truth)
+        full_prompt = f"### Instruction:\n{example['instruction']}\n\n"
+        if example.get("input", ""):
+            full_prompt += f"### Input:\n{example['input']}\n\n"
+        full_prompt += f"### Response:\n{example['output']}"
+
+        samples.append({
+            'input_text': prompt,
+            'full_text': full_prompt,
+            'ground_truth': example['output'],
+            'original_idx': idx
+        })
+
+    return samples
+
+
+def generate_model_outputs(model_engine, samples, tokenizer, max_new_tokens=256):
+    """
+    Generate outputs from the model for the given samples.
+
+    Args:
+        model_engine: The DeepSpeed model engine
+        samples: List of sample dictionaries
+        tokenizer: The tokenizer
+        max_new_tokens: Maximum number of new tokens to generate
+
+    Returns:
+        List of generated outputs
+    """
+    import torch
+    from deepspeed import comm as dist
+
+    rank = dist.get_rank() if dist.is_initialized() else 0
+
+    # Store original training state
+    was_training = model_engine.training
+    model_engine.eval()
+
+    generated_outputs = []
+
+    for i, sample in enumerate(samples):
+        if rank == 0:
+            print(f"Generating output for sample {i+1}/{len(samples)}")
+
+        # Tokenize input
+        inputs = tokenizer(sample['input_text'], return_tensors="pt", truncation=True, padding=True)
+        input_ids = inputs["input_ids"].to(model_engine.device)
+
+        # Generate output
+        with torch.no_grad():
+            outputs = model_engine.module.generate(
+                input_ids,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.9,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id
+            )
+
+        # Decode the generated part only (excluding input)
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        # Extract only the generated part (after the input)
+        if sample['input_text'] in generated_text:
+            generated_part = generated_text.split(sample['input_text'], 1)[1].strip()
+        else:
+            # If the input text is not found in the generated text, return the whole generated text
+            generated_part = generated_text[len(tokenizer.decode(input_ids[0], skip_special_tokens=True)):]
+
+        generated_outputs.append(generated_part)
+
+    # Restore original training state
+    if was_training:
+        model_engine.train()
+
+    return generated_outputs
+
+
+def format_comparison_output(samples, before_outputs, after_outputs):
+    """
+    Format the comparison output in a human-readable format.
+
+    Args:
+        samples: List of sample dictionaries
+        before_outputs: List of outputs before training
+        after_outputs: List of outputs after training
+    """
+    print("\n" + "="*80)
+    print("MoE Model Output Comparison - Sample Analysis")
+    print("="*80)
+    print()
+
+    for i, (sample, before_out, after_out) in enumerate(zip(samples, before_outputs, after_outputs)):
+        print(f"Sample #{i+1}:")
+        print(f"Input: {repr(sample['input_text'])}")
+        print("-" * 80)
+        print(f"BEFORE Training: {repr(before_out)}")
+        print("-" * 80)
+        print(f"AFTER Training:  {repr(after_out)}")
+        print("-" * 80)
+        print(f"GROUND TRUTH:    {repr(sample['ground_truth'])}")
+        print("=" * 80)
+        print()
+
 
 def preprocess_alpaca(example, tokenizer, max_length=512):
     prompt = f"### Instruction:\n{example['instruction']}\n\n"
@@ -493,6 +627,16 @@ def main(args):
         if dist.get_rank() == 0:
             print(f"Baseline accuracy before training: {baseline_accuracy:.4f}")
 
+    # Sample test examples for comparison
+    if dist.get_rank() == 0:
+        print("Sampling test examples for comparison...")
+    test_samples = sample_test_examples(test_dataset, tokenizer, num_samples=10, seed=args.seed)
+
+    # Generate outputs before training
+    if dist.get_rank() == 0:
+        print("Generating outputs before training...")
+    before_training_outputs = generate_model_outputs(model_engine, test_samples, tokenizer)
+
     # Perform gate output analysis before fine-tuning
     # if dist.get_rank() == 0:
     #     print("Performing gate output analysis before fine-tuning...")
@@ -593,6 +737,16 @@ def main(args):
     if args.bench_start >= 0 and args.bench_steps > 0:
         if dist.get_rank() == 0:
             print (f"Average iteration time = {total_time/total_count}")
+
+    # Generate outputs after training
+    if dist.get_rank() == 0:
+        print("Generating outputs after training...")
+    after_training_outputs = generate_model_outputs(model_engine, test_samples, tokenizer)
+
+    # Format comparison output
+    if dist.get_rank() == 0:
+        print("Formatting comparison output...")
+    format_comparison_output(test_samples, before_training_outputs, after_training_outputs)
 
     # Perform gate output analysis after fine-tuning
     # if dist.get_rank() == 0:
