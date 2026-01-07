@@ -223,13 +223,14 @@ def sample_test_examples(test_dataset, tokenizer, num_samples=10, seed=42):
         List of dictionaries containing input text and labels
     """
     import random
+    from tqdm import tqdm
     random.seed(seed)
 
     # Randomly sample indices
     sampled_indices = random.sample(range(len(test_dataset)), num_samples)
 
     samples = []
-    for idx in sampled_indices:
+    for idx in tqdm(sampled_indices, desc="Sampling test examples", total=num_samples):
         example = test_dataset[idx]
 
         # Reconstruct the input text from the example
@@ -269,6 +270,7 @@ def generate_model_outputs(model_engine, samples, tokenizer, max_new_tokens=256)
     """
     import torch
     from deepspeed import comm as dist
+    from tqdm import tqdm
 
     rank = dist.get_rank() if dist.is_initialized() else 0
 
@@ -278,10 +280,10 @@ def generate_model_outputs(model_engine, samples, tokenizer, max_new_tokens=256)
 
     generated_outputs = []
 
-    for i, sample in enumerate(samples):
-        if rank == 0:
-            print(f"Generating output for sample {i+1}/{len(samples)}")
+    # Use tqdm for progress bar if on rank 0
+    sample_iterator = tqdm(enumerate(samples), total=len(samples), desc="Generating outputs", disable=(rank != 0))
 
+    for i, sample in sample_iterator:
         # Tokenize input
         inputs = tokenizer(sample['input_text'], return_tensors="pt", truncation=True, padding=True)
         input_ids = inputs["input_ids"].to(model_engine.device)
