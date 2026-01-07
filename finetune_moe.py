@@ -290,7 +290,7 @@ def generate_model_outputs(model_engine, samples, tokenizer, max_new_tokens=256)
 
         # Generate output
         with torch.no_grad():
-            outputs = model_engine.module.generate(
+            outputs = model_engine.generate(
                 input_ids,
                 max_new_tokens=max_new_tokens,
                 do_sample=True,
