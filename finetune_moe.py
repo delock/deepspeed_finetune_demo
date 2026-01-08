@@ -257,13 +257,16 @@ def sample_test_examples(test_dataset, tokenizer, num_samples=10, seed=42):
 
 def generate_model_outputs(model_engine, samples, tokenizer, max_new_tokens=256):
     """
-    Generate outputs from the model for the given samples.
+    Generate outputs from the model for the given samples using forward pass.
+    This function gets the model's response to the input by using the logits
+    from the forward pass. For efficiency, we only perform a single forward pass
+    and return the logits for the last token position.
 
     Args:
         model_engine: The DeepSpeed model engine
         samples: List of sample dictionaries
         tokenizer: The tokenizer
-        max_new_tokens: Maximum number of new tokens to generate
+        max_new_tokens: Maximum number of new tokens to generate (not used in forward pass)
 
     Returns:
         List of generated outputs
@@ -288,29 +291,19 @@ def generate_model_outputs(model_engine, samples, tokenizer, max_new_tokens=256)
         inputs = tokenizer(sample['input_text'], return_tensors="pt", truncation=True, padding=True)
         input_ids = inputs["input_ids"].to(model_engine.device)
 
-        # Generate output
+        # Use forward pass to get logits
         with torch.no_grad():
-            outputs = model_engine.generate(
-                input_ids,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.9,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id
-            )
+            outputs = model_engine(input_ids=input_ids)
+            logits = outputs.logits
 
-        # Decode the generated part only (excluding input)
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # Get the predicted token for the next position (after the last input token)
+        next_token_logits = logits[:, -1, :]  # Get logits for the next token
+        next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
 
-        # Extract only the generated part (after the input)
-        if sample['input_text'] in generated_text:
-            generated_part = generated_text.split(sample['input_text'], 1)[1].strip()
-        else:
-            # If the input text is not found in the generated text, return the whole generated text
-            generated_part = generated_text[len(tokenizer.decode(input_ids[0], skip_special_tokens=True)):]
+        # Decode the single predicted token
+        predicted_text = tokenizer.decode(next_token_id[0], skip_special_tokens=True)
 
-        generated_outputs.append(generated_part)
+        generated_outputs.append(predicted_text)
 
     # Restore original training state
     if was_training:
@@ -359,6 +352,7 @@ def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
     """
     Calculate accuracy by comparing model predictions with true labels.
     Accuracy is computed as the percentage of correctly predicted tokens.
+    Distributed implementation: each rank processes a subset of samples.
     """
     import torch
     from tqdm import tqdm
@@ -372,24 +366,70 @@ def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
 
-    with torch.no_grad():
-        if rank == 0:
-            enum = enumerate(tqdm(eval_dataloader, desc=f"Accuracy Calc [rank {rank}]", leave=False))
-        else:
-            enum = enumerate(eval_dataloader)
+    # Lists to store prompts and targets for BLEU evaluation
+    all_predictions = []
+    all_references = []
 
-        all_predictions = []
-        all_references = []
-        for batch_idx, batch in enum:
-            #if batch_idx % world_size != rank:
-                #continue
-            # in zero stage 3, you need other rank to participate to continue inference
-            #if batch_idx >= len(eval_dataloader) - (len(eval_dataloader) % world_size):
-                #continue
+    # Collect all batches first, then distribute among ranks
+    all_batches = []
+    batch_count = 0
+
+    with torch.no_grad():
+        # Collect all batches from the dataloader
+        for batch_idx, batch in enumerate(eval_dataloader):
+            all_batches.append(batch)
+            batch_count += 1
+
+    # Record original batch count before padding
+    original_batches_count = len(all_batches)
+
+    # Pad batches to ensure total number is divisible by world_size for ZeRO-3 compatibility
+    remainder = original_batches_count % world_size
+    if remainder != 0:
+        # Add copies of the first few batches to make total_batches divisible by world_size
+        batches_needed = world_size - remainder
+        for i in range(batches_needed):
+            all_batches.append(all_batches[i])
+
+        # Calculate total number of batches each rank will iterate through
+        # This ensures all ranks perform the same number of iterations for synchronization
+        total_iterations = len(all_batches)
+
+        # Initialize progress bar with total number of batches across all ranks
+        if rank == 0:
+            progress_bar = tqdm(total=total_iterations,
+                               desc=f"Accuracy Calc [rank {rank}]",
+                               leave=False)
+        else:
+            progress_bar = None
+
+        # All ranks iterate through all padded batches, but only accumulate results for original batches
+        for batch_idx in range(total_iterations):
+            batch = all_batches[batch_idx]
+
+            # Print batch structure for debugging (only first batch on rank 0)
+            if rank == 0 and batch_idx == 0:
+                print(f"\n[Batch Debug] Keys: {list(batch.keys())}")
+                for k, v in batch.items():
+                    if k in ['input_ids', 'labels']:
+                        # Decode text and stop at special control characters
+                        sample_ids = v[0] if len(v.shape) > 1 and v.shape[0] > 0 else v
+                        sample_ids_list = sample_ids.cpu().tolist() if hasattr(sample_ids, 'tolist') else [sample_ids]
+                        decoded_text = tokenizer.decode(sample_ids_list, skip_special_tokens=True)  # Skip special tokens to avoid control chars
+                        # Find first control character and truncate there
+                        clean_text = ""
+                        for char in decoded_text:
+                            if ord(char) < 32 and char not in ['\n', '\t']:  # Control chars except newline and tab
+                                break
+                            clean_text += char
+                        print(f"[Batch Debug] {k}: shape={v.shape}, decoded_text={repr(clean_text)}")  # Show clean text without length limit
+                    else:
+                        print(f"[Batch Debug] {k}: shape={v.shape}, dtype={v.dtype}")
+                print()
 
             batch = {k: v.to(model_engine.device) for k, v in batch.items()}
 
-            # Get model predictions
+            # ALL ranks execute model forward pass for synchronization in ZeRO-3
             outputs = model_engine(**batch)
             logits = outputs.logits
 
@@ -400,21 +440,36 @@ def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
             labels = batch["labels"]
 
             assert (len(predictions)==len(labels))
-            for i in range(len(predictions)):
-                all_predictions.append(predictions[i])
-                all_references.append(labels[i])
 
-            # Create mask for non-padding tokens
-            mask = labels != -100  # -100 is typically used for ignored tokens in labels
+            # Accumulate results only for original batches (not padded ones), and only for assigned batches
+            is_original_batch = batch_idx < original_batches_count
+            is_assigned_to_this_rank = batch_idx % world_size == rank
 
-            # Count correct predictions only for non-padding tokens
-            correct_predictions = (predictions == labels) & mask
-            total_correct += correct_predictions.sum().item()
-            total_tokens += mask.sum().item()
+            if is_assigned_to_this_rank:
+                for i in range(len(predictions)):
+                    all_predictions.append(predictions[i])
+                    all_references.append(labels[i])
 
-            processed_batches += 1
+                # Create mask for non-padding tokens
+                mask = labels != -100  # -100 is typically used for ignored tokens in labels
 
-            # 先把张量搬到 CPU 并转成纯 Python 列表
+                # Count correct predictions only for non-padding tokens
+                correct_predictions = (predictions == labels) & mask
+                if is_original_batch:  # Only accumulate for original batches
+                    total_correct += correct_predictions.sum().item()
+                    total_tokens += mask.sum().item()
+
+                if is_original_batch:
+                    processed_batches += 1
+
+            if progress_bar:
+                progress_bar.update(1)
+
+        if progress_bar:
+            progress_bar.close()
+
+        # Calculate token-level accuracy as before
+        # 先把张量搬到 CPU 并转成纯 Python 列表
         pred_ids = [p.detach().cpu().tolist() for p in all_predictions]  # List[List[int]]
 
         # 如果 label 是字符串，就可以跳过 decode
@@ -425,16 +480,12 @@ def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
         pred_texts = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
         ref_texts  = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
 
-        # 如果每个样本有多个参考答案，组织成 List[List[str]] 的结构；否则也可以单参考：
-        references = [[r] for r in ref_texts]  # 单参考
-        predictions = pred_texts
-
-        preds_tok = [p.split() for p in predictions]
-        refs_tok = [[r.split() for r in ref_group] for ref_group in references]
-
-        corpus_bleu_4 = corpus_bleu(refs_tok, preds_tok, weights=(0.25, 0.25, 0.25, 0.25))
-        print(f"Corpus BLEU-4: {corpus_bleu_4:.4f}")
-
+        # 输出第一个样本的预测和参考文本，用于调试 (only on rank 0)
+        if rank == 0 and len(pred_texts) > 0 and len(ref_texts) > 0:
+            print(f"\n--- First Sample Analysis ---")
+            print(f"Predicted text: {repr(pred_texts[0])}")
+            print(f"Reference text: {repr(ref_texts[0])}")
+            print(f"--- End First Sample Analysis ---\n")
 
 
     model_engine.train()
@@ -584,6 +635,13 @@ def main(args):
     train_dataset = split_dataset2["train"]
     test_dataset = split_dataset2["test"]
 
+    # Limit training dataset size if specified
+    if args.train_dataset_size is not None and args.train_dataset_size < len(train_dataset):
+        train_dataset = train_dataset.select(range(args.train_dataset_size))
+        print(f"Training dataset limited to {args.train_dataset_size} samples")
+    else:
+        print(f"Using full training dataset with {len(train_dataset)} samples")
+
     tokenized_train_dataset = train_dataset.map(lambda x: preprocess_alpaca(x, tokenizer), batched=False)
     tokenized_eval_dataset = eval_dataset.map(lambda x: preprocess_alpaca(x, tokenizer), batched=False)
     tokenized_test_dataset = test_dataset.map(lambda x: preprocess_alpaca(x, tokenizer), batched=False)
@@ -622,22 +680,26 @@ def main(args):
     print (model)
 
     # Calculate baseline accuracy before training
-    if args.calc_accuracy:
-        if dist.get_rank() == 0:
-            print("Calculating baseline accuracy before training...")
-        baseline_accuracy = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
-        if dist.get_rank() == 0:
-            print(f"Baseline accuracy before training: {baseline_accuracy:.4f}")
+    #if args.calc_accuracy:
+        #if dist.get_rank() == 0:
+            #print("Calculating baseline accuracy before training...")
+        #baseline_accuracy = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
+        #if dist.get_rank() == 0:
+            #print(f"Baseline accuracy before training: {baseline_accuracy:.4f}")
 
     # Sample test examples for comparison
-    if dist.get_rank() == 0:
-        print("Sampling test examples for comparison...")
-    test_samples = sample_test_examples(test_dataset, tokenizer, num_samples=10, seed=args.seed)
+    # if dist.get_rank() == 0:
+    #     print("Sampling test examples for comparison...")
+    # test_samples = sample_test_examples(test_dataset, tokenizer, num_samples=10, seed=args.seed)
+    #
+    # # Generate outputs before training
+    # # if dist.get_rank() == 0:
+    # #     print("Generating outputs before training...")
+    # # before_training_outputs = generate_model_outputs(model_engine, test_samples, tokenizer)
 
-    # Generate outputs before training
-    if dist.get_rank() == 0:
-        print("Generating outputs before training...")
-    before_training_outputs = generate_model_outputs(model_engine, test_samples, tokenizer)
+    # Skip sampling and generation for now to speed up training
+    test_samples = []
+    before_training_outputs = []
 
     # Perform gate output analysis before fine-tuning
     # if dist.get_rank() == 0:
@@ -741,14 +803,17 @@ def main(args):
             print (f"Average iteration time = {total_time/total_count}")
 
     # Generate outputs after training
-    if dist.get_rank() == 0:
-        print("Generating outputs after training...")
-    after_training_outputs = generate_model_outputs(model_engine, test_samples, tokenizer)
+    # if dist.get_rank() == 0:
+    #     print("Generating outputs after training...")
+    # after_training_outputs = generate_model_outputs(model_engine, test_samples, tokenizer)
+    #
+    # # Format comparison output
+    # # if dist.get_rank() == 0:
+    # #     print("Formatting comparison output...")
+    # # format_comparison_output(test_samples, before_training_outputs, after_training_outputs)
 
-    # Format comparison output
-    if dist.get_rank() == 0:
-        print("Formatting comparison output...")
-    format_comparison_output(test_samples, before_training_outputs, after_training_outputs)
+    # Skip comparison for now to speed up training
+    print("Skipping comparison output for training run")
 
     # Perform gate output analysis after fine-tuning
     # if dist.get_rank() == 0:
@@ -761,9 +826,9 @@ def main(args):
     # gate_comparison = compare_gate_analysis(gate_analysis_before, gate_analysis_after)
 
     # Save model using DeepSpeed's save_checkpoint method
-    model_engine.save_checkpoint(f"{args.output_dir}{dist.get_rank()}")
-    tokenizer.save_pretrained(f"{args.output_dir}{dist.get_rank()}")
-    print("Model saved.")
+    #model_engine.save_checkpoint(f"{args.output_dir}{dist.get_rank()}")
+    #tokenizer.save_pretrained(f"{args.output_dir}{dist.get_rank()}")
+    #print("Model saved.")
 
     # Calculate final accuracy after training
     if args.calc_accuracy:
@@ -772,9 +837,10 @@ def main(args):
         final_accuracy = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
         if dist.get_rank() == 0:
             print(f"Final accuracy after training: {final_accuracy:.4f}")
-#
-        #if 'baseline_accuracy' in locals():
-            #print(f"Accuracy improvement: {final_accuracy - baseline_accuracy:.4f}")
+
+        # Calculate accuracy improvement if baseline accuracy is available
+        if 'baseline_accuracy' in locals() and dist.get_rank() == 0:
+            print(f"Accuracy improvement: {final_accuracy - baseline_accuracy:.4f}")
 
 
 if __name__ == "__main__":
@@ -794,6 +860,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_train_samples", type=int, default=4000)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--train_dataset_size", type=int, default=None, help="Specify the size of the training dataset to use (None means use full dataset)")
     parser.add_argument("--bench_start", type=int, default=-1)
     parser.add_argument("--bench_steps", type=int, default=100)
     parser.add_argument("--eval_steps", type=int, default=0, help="Run evaluation every N steps (0 disables)")
