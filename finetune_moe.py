@@ -340,12 +340,47 @@ def format_comparison_output(samples, before_outputs, after_outputs):
 
 
 def preprocess_alpaca(example, tokenizer, max_length=512):
+    # Build the full prompt
     prompt = f"### Instruction:\n{example['instruction']}\n\n"
     if example.get("input", ""):
         prompt += f"### Input:\n{example['input']}\n\n"
     prompt += f"### Response:\n{example['output']}"
+
+    # Tokenize the full prompt
     tokenized = tokenizer(prompt, truncation=True, max_length=max_length, padding="max_length")
-    tokenized["labels"] = tokenized["input_ids"].copy()
+
+    # Create labels with -100 for instruction and input parts, actual tokens for response part
+    input_ids = tokenized["input_ids"]
+
+    # Tokenize each part separately to find their lengths
+    instruction_part = f"### Instruction:\n{example['instruction']}\n\n"
+    tokenized_instruction = tokenizer(instruction_part, add_special_tokens=False)
+    instruction_len = len(tokenized_instruction["input_ids"])
+
+    input_part = ""
+    if example.get("input", ""):
+        input_part = f"### Input:\n{example['input']}\n\n"
+        tokenized_input = tokenizer(input_part, add_special_tokens=False)
+        input_len = len(tokenized_input["input_ids"])
+    else:
+        input_len = 0
+
+    response_part = f"### Response:\n{example['output']}"
+    tokenized_response = tokenizer(response_part, add_special_tokens=False)
+    response_len = len(tokenized_response["input_ids"])
+
+    # Create labels with -100 for instruction and input parts, actual tokens for response part
+    labels = [-100] * len(input_ids)
+
+    # Only the response part should have actual token IDs, others should be -100
+    response_start_idx = instruction_len + input_len
+    response_end_idx = min(response_start_idx + response_len, len(input_ids))
+
+    for i in range(response_start_idx, response_end_idx):
+        if i < len(input_ids):
+            labels[i] = input_ids[i]
+
+    tokenized["labels"] = labels
     return tokenized
 
 def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
@@ -415,14 +450,36 @@ def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
                         # Decode text and stop at special control characters
                         sample_ids = v[0] if len(v.shape) > 1 and v.shape[0] > 0 else v
                         sample_ids_list = sample_ids.cpu().tolist() if hasattr(sample_ids, 'tolist') else [sample_ids]
-                        decoded_text = tokenizer.decode(sample_ids_list, skip_special_tokens=True)  # Skip special tokens to avoid control chars
-                        # Find first control character and truncate there
-                        clean_text = ""
-                        for char in decoded_text:
-                            if ord(char) < 32 and char not in ['\n', '\t']:  # Control chars except newline and tab
-                                break
-                            clean_text += char
-                        print(f"[Batch Debug] {k}: shape={v.shape}, decoded_text={repr(clean_text)}")  # Show clean text without length limit
+
+                        # Filter out invalid token IDs to prevent overflow error
+                        # Valid token IDs should be in range [0, vocab_size)
+                        vocab_size = tokenizer.vocab_size
+                        filtered_ids = []
+                        for token_id in sample_ids_list:
+                            # Check if token_id is valid (non-negative and within vocab range)
+                            if isinstance(token_id, int) and 0 <= token_id < vocab_size:
+                                filtered_ids.append(token_id)
+                            elif isinstance(token_id, int) and token_id == -100:
+                                # Skip -100 tokens (used for ignored positions)
+                                continue
+                            elif isinstance(token_id, int) and token_id < 0:
+                                # For other negative values, skip them
+                                continue
+                            else:
+                                # If it's not an int, skip it
+                                continue
+
+                        if filtered_ids:  # Only decode if there are valid tokens
+                            decoded_text = tokenizer.decode(filtered_ids, skip_special_tokens=True)  # Skip special tokens to avoid control chars
+                            # Find first control character and truncate there
+                            clean_text = ""
+                            for char in decoded_text:
+                                if ord(char) < 32 and char not in ['\n', '\t']:  # Control chars except newline and tab
+                                    break
+                                clean_text += char
+                            print(f"[Batch Debug] {k}: shape={v.shape}, decoded_text={repr(clean_text)}")  # Show clean text without length limit
+                        else:
+                            print(f"[Batch Debug] {k}: shape={v.shape}, dtype={v.dtype}, no valid tokens to decode")
                     else:
                         print(f"[Batch Debug] {k}: shape={v.shape}, dtype={v.dtype}")
                 print()
@@ -475,10 +532,63 @@ def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
         # 如果 label 是字符串，就可以跳过 decode
         label_ids = [p.detach().cpu().tolist() for p in all_references]  # List[List[int]]
 
+        # Filter out invalid token IDs to prevent overflow error
+        # Valid token IDs should be in range [0, vocab_size) or -100 (ignored tokens)
+        vocab_size = tokenizer.vocab_size
+        filtered_pred_ids = []
+        filtered_label_ids = []
+
+        for pred_seq in pred_ids:
+            filtered_seq = []
+            for token_id in pred_seq:
+                if isinstance(token_id, int) and 0 <= token_id < vocab_size:
+                    filtered_seq.append(token_id)
+                elif isinstance(token_id, int) and token_id == -100:
+                    # Keep -100 tokens but replace with a valid token ID for decoding
+                    # We'll use the pad token ID as a placeholder
+                    filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+                elif isinstance(token_id, int) and token_id < 0:
+                    # For other negative values, use pad token as placeholder
+                    filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+                else:
+                    # If it's not an int, try to convert or use pad token
+                    try:
+                        int_token_id = int(token_id)
+                        if 0 <= int_token_id < vocab_size:
+                            filtered_seq.append(int_token_id)
+                        else:
+                            filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+                    except:
+                        filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+            filtered_pred_ids.append(filtered_seq)
+
+        for label_seq in label_ids:
+            filtered_seq = []
+            for token_id in label_seq:
+                if isinstance(token_id, int) and 0 <= token_id < vocab_size:
+                    filtered_seq.append(token_id)
+                elif isinstance(token_id, int) and token_id == -100:
+                    # Keep -100 tokens but replace with a valid token ID for decoding
+                    filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+                elif isinstance(token_id, int) and token_id < 0:
+                    # For other negative values, use pad token as placeholder
+                    filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+                else:
+                    # If it's not an int, try to convert or use pad token
+                    try:
+                        int_token_id = int(token_id)
+                        if 0 <= int_token_id < vocab_size:
+                            filtered_seq.append(int_token_id)
+                        else:
+                            filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+                    except:
+                        filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+            filtered_label_ids.append(filtered_seq)
+
         # 用 tokenizer 批量 decode 成字符串
         # 注意：skip_special_tokens=True 可以去掉 <pad>, <bos>, <eos> 等特殊符号
-        pred_texts = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
-        ref_texts  = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+        pred_texts = tokenizer.batch_decode(filtered_pred_ids, skip_special_tokens=True)
+        ref_texts  = tokenizer.batch_decode(filtered_label_ids, skip_special_tokens=True)
 
         # 输出第一个样本的预测和参考文本，用于调试 (only on rank 0)
         if rank == 0 and len(pred_texts) > 0 and len(ref_texts) > 0:
@@ -690,12 +800,12 @@ def main(args):
     print (model)
 
     # Calculate baseline accuracy before training
-    #if args.calc_accuracy:
-        #if dist.get_rank() == 0:
-            #print("Calculating baseline accuracy before training...")
-        #baseline_accuracy = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
-        #if dist.get_rank() == 0:
-            #print(f"Baseline accuracy before training: {baseline_accuracy:.4f}")
+    if args.calc_accuracy:
+        if dist.get_rank() == 0:
+            print("Calculating baseline accuracy before training...")
+        baseline_accuracy = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
+        if dist.get_rank() == 0:
+            print(f"Baseline accuracy before training: {baseline_accuracy:.4f}")
 
     # Sample test examples for comparison
     # if dist.get_rank() == 0:
