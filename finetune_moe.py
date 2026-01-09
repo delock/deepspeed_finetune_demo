@@ -610,14 +610,24 @@ def main(args):
 
     model.gradient_checkpointing_enable()
 
-    # Freeze all parameters except gate parameters BEFORE DeepSpeed initialization
-    # This needs to be done before passing to DeepSpeed
-    for name, param in model.named_parameters():
-        if 'gate' in name.lower() and not 'gate_proj' in name.lower():
-            param.requires_grad = True
-            print(f"Unfrozen parameter: {name}")
-        else:
-            param.requires_grad = False
+    # Check if the model has MoE gates by looking for 'gate' in parameter names
+    has_moe_gates = any('gate' in name.lower() and 'gate_proj' not in name.lower() for name in model.state_dict().keys())
+
+    if has_moe_gates:
+        print("Detected MoE model with gate parameters. Freezing all parameters except gate parameters.")
+        # Freeze all parameters except gate parameters BEFORE DeepSpeed initialization
+        # This needs to be done before passing to DeepSpeed
+        for name, param in model.named_parameters():
+            if 'gate' in name.lower() and not 'gate_proj' in name.lower():
+                param.requires_grad = True
+                print(f"Unfrozen parameter: {name}")
+            else:
+                param.requires_grad = False
+    else:
+        print("Detected non-MoE model. Using default parameter freezing behavior.")
+        # For non-MoE models, we don't modify the parameter freezing behavior
+        # DeepSpeed will handle parameter management according to its configuration
+        pass  # Do nothing - let DeepSpeed handle parameters as configured
 
     # Enable input gradient requirements to ensure gradient flow
     # This is needed when using gradient checkpointing with partially frozen models
