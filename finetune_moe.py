@@ -339,7 +339,17 @@ def format_comparison_output(samples, before_outputs, after_outputs):
         print()
 
 
-def preprocess_alpaca(example, tokenizer, max_length=512):
+def preprocess_alpaca(example, tokenizer, max_length=512, mask_instruction_input=True):
+    """
+    Preprocess Alpaca examples for training.
+
+    Args:
+        example: The example dictionary with 'instruction', 'input', 'output'
+        tokenizer: The tokenizer
+        max_length: Maximum sequence length
+        mask_instruction_input: If True, mask instruction and input parts in labels (standard approach)
+                               If False, use full sequence as labels (experimental approach)
+    """
     # Build the full prompt
     prompt = f"### Instruction:\n{example['instruction']}\n\n"
     if example.get("input", ""):
@@ -349,38 +359,43 @@ def preprocess_alpaca(example, tokenizer, max_length=512):
     # Tokenize the full prompt
     tokenized = tokenizer(prompt, truncation=True, max_length=max_length, padding="max_length")
 
-    # Create labels with -100 for instruction and input parts, actual tokens for response part
-    input_ids = tokenized["input_ids"]
+    if mask_instruction_input:
+        # Standard approach: mask instruction and input parts, only keep response part
+        input_ids = tokenized["input_ids"]
 
-    # Tokenize each part separately to find their lengths
-    instruction_part = f"### Instruction:\n{example['instruction']}\n\n"
-    tokenized_instruction = tokenizer(instruction_part, add_special_tokens=False)
-    instruction_len = len(tokenized_instruction["input_ids"])
+        # Tokenize each part separately to find their lengths
+        instruction_part = f"### Instruction:\n{example['instruction']}\n\n"
+        tokenized_instruction = tokenizer(instruction_part, add_special_tokens=False)
+        instruction_len = len(tokenized_instruction["input_ids"])
 
-    input_part = ""
-    if example.get("input", ""):
-        input_part = f"### Input:\n{example['input']}\n\n"
-        tokenized_input = tokenizer(input_part, add_special_tokens=False)
-        input_len = len(tokenized_input["input_ids"])
+        input_part = ""
+        if example.get("input", ""):
+            input_part = f"### Input:\n{example['input']}\n\n"
+            tokenized_input = tokenizer(input_part, add_special_tokens=False)
+            input_len = len(tokenized_input["input_ids"])
+        else:
+            input_len = 0
+
+        response_part = f"### Response:\n{example['output']}"
+        tokenized_response = tokenizer(response_part, add_special_tokens=False)
+        response_len = len(tokenized_response["input_ids"])
+
+        # Create labels with -100 for instruction and input parts, actual tokens for response part
+        labels = [-100] * len(tokenized["input_ids"])
+
+        # Only the response part should have actual token IDs, others should be -100
+        response_start_idx = instruction_len + input_len
+        response_end_idx = min(response_start_idx + response_len, len(tokenized["input_ids"]))
+
+        for i in range(response_start_idx, response_end_idx):
+            if i < len(tokenized["input_ids"]):
+                labels[i] = tokenized["input_ids"][i]
+
+        tokenized["labels"] = labels
     else:
-        input_len = 0
+        # Experimental approach: use full sequence as labels (no masking)
+        tokenized["labels"] = tokenized["input_ids"].copy()
 
-    response_part = f"### Response:\n{example['output']}"
-    tokenized_response = tokenizer(response_part, add_special_tokens=False)
-    response_len = len(tokenized_response["input_ids"])
-
-    # Create labels with -100 for instruction and input parts, actual tokens for response part
-    labels = [-100] * len(input_ids)
-
-    # Only the response part should have actual token IDs, others should be -100
-    response_start_idx = instruction_len + input_len
-    response_end_idx = min(response_start_idx + response_len, len(input_ids))
-
-    for i in range(response_start_idx, response_end_idx):
-        if i < len(input_ids):
-            labels[i] = input_ids[i]
-
-    tokenized["labels"] = labels
     return tokenized
 
 def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
@@ -507,10 +522,11 @@ def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
                     all_predictions.append(predictions[i])
                     all_references.append(labels[i])
 
-                # Create mask for non-padding tokens
-                mask = labels != -100  # -100 is typically used for ignored tokens in labels
+                # Create mask for non-padding tokens (this preserves the original behavior)
+                # Only tokens that are not -100 will be counted in accuracy
+                mask = labels != -100  # -100 is used for ignored tokens in labels
 
-                # Count correct predictions only for non-padding tokens
+                # Count correct predictions only for non-padding tokens (which are the response tokens)
                 correct_predictions = (predictions == labels) & mask
                 if is_original_batch:  # Only accumulate for original batches
                     total_correct += correct_predictions.sum().item()
@@ -613,7 +629,206 @@ def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
         return 0.0  # Return 0 accuracy if no valid tokens
 
     accuracy = (local_correct / local_total).item()
+
+    # Print token counts on rank 0
+    if rank == 0:
+        print(f"Correctly predicted tokens: {int(local_correct.item())}")
+        print(f"Total tokens to predict: {int(local_total.item())}")
+        print(f"Accuracy: {accuracy:.6f}")
+
     return accuracy
+
+
+def calculate_accuracy_detailed(model_engine, eval_dataloader, tokenizer):
+    """
+    Calculate accuracy by comparing model predictions with true labels.
+    Returns both full sequence accuracy and response-only accuracy.
+    Accuracy is computed as the percentage of correctly predicted tokens.
+    Distributed implementation: each rank processes a subset of samples.
+    """
+    import torch
+    from tqdm import tqdm
+    from deepspeed import comm as dist
+
+    model_engine.eval()
+    total_correct_full = 0
+    total_tokens_full = 0
+    total_correct_response = 0
+    total_tokens_response = 0
+    processed_batches = 0
+
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    rank = dist.get_rank() if dist.is_initialized() else 0
+
+    # Lists to store prompts and targets for potential BLEU evaluation
+    all_predictions = []
+    all_references = []
+
+    # Collect all batches first, then distribute among ranks
+    all_batches = []
+    batch_count = 0
+
+    with torch.no_grad():
+        # Collect all batches from the dataloader
+        for batch_idx, batch in enumerate(eval_dataloader):
+            all_batches.append(batch)
+            batch_count += 1
+
+    # Record original batch count before padding
+    original_batches_count = len(all_batches)
+
+    # Pad batches to ensure total number is divisible by world_size for ZeRO-3 compatibility
+    remainder = original_batches_count % world_size
+    if remainder != 0:
+        # Add copies of the first few batches to make total_batches divisible by world_size
+        batches_needed = world_size - remainder
+        for i in range(batches_needed):
+            all_batches.append(all_batches[i])
+
+    # Calculate total number of batches each rank will iterate through
+    # This ensures all ranks perform the same number of iterations for synchronization
+    total_iterations = len(all_batches)
+
+    # Initialize progress bar with total number of batches across all ranks
+    if rank == 0:
+        progress_bar = tqdm(total=total_iterations,
+                           desc=f"Detailed Accuracy Calc [rank {rank}]",
+                           leave=False)
+    else:
+        progress_bar = None
+
+    # All ranks iterate through all padded batches, but only accumulate results for original batches
+    for batch_idx in range(total_iterations):
+        batch = all_batches[batch_idx]
+
+        # Print batch structure for debugging (only first batch on rank 0)
+        if rank == 0 and batch_idx == 0:
+            print(f"\n[Batch Debug] Keys: {list(batch.keys())}")
+            for k, v in batch.items():
+                if k in ['input_ids', 'labels']:
+                    # Decode text and stop at special control characters
+                    sample_ids = v[0] if len(v.shape) > 1 and v.shape[0] > 0 else v
+                    sample_ids_list = sample_ids.cpu().tolist() if hasattr(sample_ids, 'tolist') else [sample_ids]
+
+                    # Filter out invalid token IDs to prevent overflow error
+                    # Valid token IDs should be in range [0, vocab_size)
+                    vocab_size = tokenizer.vocab_size
+                    filtered_ids = []
+                    for token_id in sample_ids_list:
+                        # Check if token_id is valid (non-negative and within vocab range)
+                        if isinstance(token_id, int) and 0 <= token_id < vocab_size:
+                            filtered_ids.append(token_id)
+                        elif isinstance(token_id, int) and token_id == -100:
+                            # Skip -100 tokens (used for ignored positions)
+                            continue
+                        elif isinstance(token_id, int) and token_id < 0:
+                            # For other negative values, skip them
+                            continue
+                        else:
+                            # If it's not an int, skip it
+                            continue
+
+                    if filtered_ids:  # Only decode if there are valid tokens
+                        decoded_text = tokenizer.decode(filtered_ids, skip_special_tokens=True)  # Skip special tokens to avoid control chars
+                        # Find first control character and truncate there
+                        clean_text = ""
+                        for char in decoded_text:
+                            if ord(char) < 32 and char not in ['\n', '\t']:  # Control chars except newline and tab
+                                break
+                            clean_text += char
+                        print(f"[Batch Debug] {k}: shape={v.shape}, decoded_text={repr(clean_text)}")  # Show clean text without length limit
+                    else:
+                        print(f"[Batch Debug] {k}: shape={v.shape}, dtype={v.dtype}, no valid tokens to decode")
+                else:
+                    print(f"[Batch Debug] {k}: shape={v.shape}, dtype={v.dtype}")
+            print()
+
+        batch = {k: v.to(model_engine.device) for k, v in batch.items()}
+
+        # ALL ranks execute model forward pass for synchronization in ZeRO-3
+        outputs = model_engine(**batch)
+        logits = outputs.logits
+
+        # Get predictions (highest probability tokens)
+        predictions = torch.argmax(logits, dim=-1)
+
+        # Get labels (ignore padding tokens - typically -100)
+        labels = batch["labels"]
+
+        assert (len(predictions)==len(labels))
+
+        # Accumulate results only for original batches (not padded ones), and only for assigned batches
+        is_original_batch = batch_idx < original_batches_count
+        is_assigned_to_this_rank = batch_idx % world_size == rank
+
+        if is_assigned_to_this_rank:
+            for i in range(len(predictions)):
+                all_predictions.append(predictions[i])
+                all_references.append(labels[i])
+
+            # Create mask for full sequence (all tokens that are not -100)
+            mask_full = labels != -100  # -100 is used for ignored tokens in labels
+
+            # Count correct predictions for full sequence
+            correct_predictions_full = (predictions == labels) & mask_full
+            if is_original_batch:  # Only accumulate for original batches
+                total_correct_full += correct_predictions_full.sum().item()
+                total_tokens_full += mask_full.sum().item()
+
+            # For response-only accuracy, we only consider the response part
+            # In our current setup, non-masked tokens (not -100) are the response tokens
+            # So response mask is the same as full mask
+            mask_response = mask_full
+            correct_predictions_response = (predictions == labels) & mask_response
+            if is_original_batch:  # Only accumulate for original batches
+                total_correct_response += correct_predictions_response.sum().item()
+                total_tokens_response += mask_response.sum().item()
+
+            if is_original_batch:
+                processed_batches += 1
+
+        if progress_bar:
+            progress_bar.update(1)
+
+    if progress_bar:
+        progress_bar.close()
+
+    model_engine.train()
+
+    # Gather totals from all ranks
+    device = model_engine.device
+    local_correct_full = torch.tensor([total_correct_full], dtype=torch.float32, device=device)
+    local_total_full = torch.tensor([total_tokens_full], dtype=torch.float32, device=device)
+    local_correct_response = torch.tensor([total_correct_response], dtype=torch.float32, device=device)
+    local_total_response = torch.tensor([total_tokens_response], dtype=torch.float32, device=device)
+
+    if dist.is_initialized():
+        dist.all_reduce(local_correct_full, op=dist.ReduceOp.SUM)
+        dist.all_reduce(local_total_full, op=dist.ReduceOp.SUM)
+        dist.all_reduce(local_correct_response, op=dist.ReduceOp.SUM)
+        dist.all_reduce(local_total_response, op=dist.ReduceOp.SUM)
+
+    # Calculate accuracies
+    if local_total_full.item() == 0:
+        accuracy_full = 0.0  # Return 0 accuracy if no valid tokens
+    else:
+        accuracy_full = (local_correct_full / local_total_full).item()
+
+    if local_total_response.item() == 0:
+        accuracy_response = 0.0  # Return 0 accuracy if no valid tokens
+    else:
+        accuracy_response = (local_correct_response / local_total_response).item()
+
+    # Print token counts on rank 0
+    if rank == 0:
+        print(f"Full Sequence - Correctly predicted tokens: {int(local_correct_full.item())}")
+        print(f"Full Sequence - Total tokens to predict: {int(local_total_full.item())}")
+        print(f"Full Sequence Accuracy: {accuracy_full:.6f}")
+        print(f"Response Only - Correctly predicted tokens: {int(local_correct_response.item())}")
+        print(f"Response Only - Total tokens to predict: {int(local_total_response.item())}")
+        print(f"Response Only Accuracy: {accuracy_response:.6f}")
+
+    return accuracy_full, accuracy_response
 
 
 def evaluate(model_engine, eval_dataloader, calc_accuracy=False):
@@ -762,9 +977,21 @@ def main(args):
     else:
         print(f"Using full training dataset with {len(train_dataset)} samples")
 
-    tokenized_train_dataset = train_dataset.map(lambda x: preprocess_alpaca(x, tokenizer), batched=False)
-    tokenized_eval_dataset = eval_dataset.map(lambda x: preprocess_alpaca(x, tokenizer), batched=False)
-    tokenized_test_dataset = test_dataset.map(lambda x: preprocess_alpaca(x, tokenizer), batched=False)
+    # Determine whether to mask instruction and input parts based on command line argument
+    mask_instruction_input_during_training = not args.no_mask_instruction_input
+
+    tokenized_train_dataset = train_dataset.map(
+        lambda x: preprocess_alpaca(x, tokenizer, mask_instruction_input=mask_instruction_input_during_training),  # Use parameter to control masking
+        batched=False
+    )
+    tokenized_eval_dataset = eval_dataset.map(
+        lambda x: preprocess_alpaca(x, tokenizer, mask_instruction_input=True),  # Always mask for evaluation to measure response quality
+        batched=False
+    )
+    tokenized_test_dataset = test_dataset.map(
+        lambda x: preprocess_alpaca(x, tokenizer, mask_instruction_input=True),  # Always mask for testing to measure response quality
+        batched=False
+    )
 
     # Create DataLoader - let DeepSpeed handle the actual batching
     train_dataloader = DataLoader(
@@ -981,6 +1208,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train_dataset_size", type=int, default=None, help="Specify the size of the training dataset to use (None means use full dataset)")
+    parser.add_argument("--no_mask_instruction_input", action="store_true", help="Don't mask instruction and input parts during training (experimental)")
     parser.add_argument("--bench_start", type=int, default=-1)
     parser.add_argument("--bench_steps", type=int, default=100)
     parser.add_argument("--eval_steps", type=int, default=0, help="Run evaluation every N steps (0 disables)")
