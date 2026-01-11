@@ -403,20 +403,23 @@ def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
     Calculate accuracy by comparing model predictions with true labels.
     Accuracy is computed as the percentage of correctly predicted tokens.
     Distributed implementation: each rank processes a subset of samples.
+    Returns both full sequence accuracy and response-only accuracy.
     """
     import torch
     from tqdm import tqdm
     from deepspeed import comm as dist
 
     model_engine.eval()
-    total_correct = 0
-    total_tokens = 0
+    total_correct_full = 0
+    total_tokens_full = 0
+    total_correct_response = 0
+    total_tokens_response = 0
     processed_batches = 0
 
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
 
-    # Lists to store prompts and targets for BLEU evaluation
+    # Lists to store prompts and targets for potential BLEU evaluation
     all_predictions = []
     all_references = []
 
@@ -441,202 +444,236 @@ def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
         for i in range(batches_needed):
             all_batches.append(all_batches[i])
 
-        # Calculate total number of batches each rank will iterate through
-        # This ensures all ranks perform the same number of iterations for synchronization
-        total_iterations = len(all_batches)
+    # Calculate total number of batches each rank will iterate through
+    # This ensures all ranks perform the same number of iterations for synchronization
+    total_iterations = len(all_batches)
 
-        # Initialize progress bar with total number of batches across all ranks
-        if rank == 0:
-            progress_bar = tqdm(total=total_iterations,
-                               desc=f"Accuracy Calc [rank {rank}]",
-                               leave=False)
-        else:
-            progress_bar = None
+    # Initialize progress bar with total number of batches across all ranks
+    if rank == 0:
+        progress_bar = tqdm(total=total_iterations,
+                           desc=f"Accuracy Calc [rank {rank}]",
+                           leave=False)
+    else:
+        progress_bar = None
 
-        # All ranks iterate through all padded batches, but only accumulate results for original batches
-        for batch_idx in range(total_iterations):
-            batch = all_batches[batch_idx]
+    # All ranks iterate through all padded batches, but only accumulate results for original batches
+    for batch_idx in range(total_iterations):
+        batch = all_batches[batch_idx]
 
-            # Print batch structure for debugging (only first batch on rank 0)
-            if rank == 0 and batch_idx == 0:
-                print(f"\n[Batch Debug] Keys: {list(batch.keys())}")
-                for k, v in batch.items():
-                    if k in ['input_ids', 'labels']:
-                        # Decode text and stop at special control characters
-                        sample_ids = v[0] if len(v.shape) > 1 and v.shape[0] > 0 else v
-                        sample_ids_list = sample_ids.cpu().tolist() if hasattr(sample_ids, 'tolist') else [sample_ids]
+        # Print batch structure for debugging (only first batch on rank 0)
+        if rank == 0 and batch_idx == 0:
+            print(f"\n[Batch Debug] Keys: {list(batch.keys())}")
+            for k, v in batch.items():
+                if k in ['input_ids', 'labels']:
+                    # Decode text and stop at special control characters
+                    sample_ids = v[0] if len(v.shape) > 1 and v.shape[0] > 0 else v
+                    sample_ids_list = sample_ids.cpu().tolist() if hasattr(sample_ids, 'tolist') else [sample_ids]
 
-                        # Filter out invalid token IDs to prevent overflow error
-                        # Valid token IDs should be in range [0, vocab_size)
-                        vocab_size = tokenizer.vocab_size
-                        filtered_ids = []
-                        for token_id in sample_ids_list:
-                            # Check if token_id is valid (non-negative and within vocab range)
-                            if isinstance(token_id, int) and 0 <= token_id < vocab_size:
-                                filtered_ids.append(token_id)
-                            elif isinstance(token_id, int) and token_id == -100:
-                                # Skip -100 tokens (used for ignored positions)
-                                continue
-                            elif isinstance(token_id, int) and token_id < 0:
-                                # For other negative values, skip them
-                                continue
-                            else:
-                                # If it's not an int, skip it
-                                continue
-
-                        if filtered_ids:  # Only decode if there are valid tokens
-                            decoded_text = tokenizer.decode(filtered_ids, skip_special_tokens=True)  # Skip special tokens to avoid control chars
-                            # Find first control character and truncate there
-                            clean_text = ""
-                            for char in decoded_text:
-                                if ord(char) < 32 and char not in ['\n', '\t']:  # Control chars except newline and tab
-                                    break
-                                clean_text += char
-                            print(f"[Batch Debug] {k}: shape={v.shape}, decoded_text={repr(clean_text)}")  # Show clean text without length limit
+                    # Filter out invalid token IDs to prevent overflow error
+                    # Valid token IDs should be in range [0, vocab_size)
+                    vocab_size = tokenizer.vocab_size
+                    filtered_ids = []
+                    for token_id in sample_ids_list:
+                        # Check if token_id is valid (non-negative and within vocab range)
+                        if isinstance(token_id, int) and 0 <= token_id < vocab_size:
+                            filtered_ids.append(token_id)
+                        elif isinstance(token_id, int) and token_id == -100:
+                            # Skip -100 tokens (used for ignored positions)
+                            continue
+                        elif isinstance(token_id, int) and token_id < 0:
+                            # For other negative values, skip them
+                            continue
                         else:
-                            print(f"[Batch Debug] {k}: shape={v.shape}, dtype={v.dtype}, no valid tokens to decode")
+                            # If it's not an int, skip it
+                            continue
+
+                    if filtered_ids:  # Only decode if there are valid tokens
+                        decoded_text = tokenizer.decode(filtered_ids, skip_special_tokens=True)  # Skip special tokens to avoid control chars
+                        # Find first control character and truncate there
+                        clean_text = ""
+                        for char in decoded_text:
+                            if ord(char) < 32 and char not in ['\n', '\t']:  # Control chars except newline and tab
+                                break
+                            clean_text += char
+                        print(f"[Batch Debug] {k}: shape={v.shape}, decoded_text={repr(clean_text)}")  # Show clean text without length limit
                     else:
-                        print(f"[Batch Debug] {k}: shape={v.shape}, dtype={v.dtype}")
-                print()
+                        print(f"[Batch Debug] {k}: shape={v.shape}, dtype={v.dtype}, no valid tokens to decode")
+                else:
+                    print(f"[Batch Debug] {k}: shape={v.shape}, dtype={v.dtype}")
+            print()
 
-            batch = {k: v.to(model_engine.device) for k, v in batch.items()}
+        batch = {k: v.to(model_engine.device) for k, v in batch.items()}
 
-            # ALL ranks execute model forward pass for synchronization in ZeRO-3
-            outputs = model_engine(**batch)
-            logits = outputs.logits
+        # ALL ranks execute model forward pass for synchronization in ZeRO-3
+        outputs = model_engine(**batch)
+        logits = outputs.logits
 
-            # Get predictions (highest probability tokens)
-            predictions = torch.argmax(logits, dim=-1)
+        # Get predictions (highest probability tokens)
+        predictions = torch.argmax(logits, dim=-1)
 
-            # Get labels (ignore padding tokens - typically -100)
-            labels = batch["labels"]
+        # Get labels (ignore padding tokens - typically -100)
+        labels = batch["labels"]
 
-            assert (len(predictions)==len(labels))
+        assert (len(predictions)==len(labels))
 
-            # Accumulate results only for original batches (not padded ones), and only for assigned batches
-            is_original_batch = batch_idx < original_batches_count
-            is_assigned_to_this_rank = batch_idx % world_size == rank
+        # Accumulate results only for original batches (not padded ones), and only for assigned batches
+        is_original_batch = batch_idx < original_batches_count
+        is_assigned_to_this_rank = batch_idx % world_size == rank
 
-            if is_assigned_to_this_rank:
-                for i in range(len(predictions)):
-                    all_predictions.append(predictions[i])
-                    all_references.append(labels[i])
+        if is_assigned_to_this_rank:
+            for i in range(len(predictions)):
+                all_predictions.append(predictions[i])
+                all_references.append(labels[i])
 
-                # Create mask for non-padding tokens (this preserves the original behavior)
-                # Only tokens that are not -100 will be counted in accuracy
-                mask = labels != -100  # -100 is used for ignored tokens in labels
+            # Create mask for full sequence (all tokens that are not -100)
+            mask_full = labels != -100  # -100 is used for ignored tokens in labels
 
-                # Count correct predictions only for non-padding tokens (which are the response tokens)
-                correct_predictions = (predictions == labels) & mask
-                if is_original_batch:  # Only accumulate for original batches
-                    total_correct += correct_predictions.sum().item()
-                    total_tokens += mask.sum().item()
+            # Count correct predictions for full sequence
+            correct_predictions_full = (predictions == labels) & mask_full
+            if is_original_batch:  # Only accumulate for original batches
+                total_correct_full += correct_predictions_full.sum().item()
+                total_tokens_full += mask_full.sum().item()
 
-                if is_original_batch:
-                    processed_batches += 1
+            # For response-only accuracy, we need to identify the response part separately
+            # In our preprocessing, only the response part has non-masked tokens (not -100)
+            # So we need to identify the response part by finding where it starts in the sequence
+            mask_response = torch.zeros_like(labels, dtype=torch.bool)
 
-            if progress_bar:
-                progress_bar.update(1)
+            # For each sequence in the batch, identify the response part
+            # We'll use the fact that in our preprocessing, the response part comes after "### Response:\n"
+            # and we can identify it by looking for the first non-masked (-100) token after the masked ones
+            for batch_i in range(labels.size(0)):
+                # Find the first non-masked token (not -100) which should be the start of response
+                # In our preprocessing, instruction and input parts are masked with -100
+                # and only the response part contains actual token IDs
+                for idx in range(len(labels[batch_i])):
+                    if labels[batch_i][idx] != -100:  # This is part of the response
+                        mask_response[batch_i][idx] = True
+
+            # Count correct predictions for response part only
+            correct_predictions_response = (predictions == labels) & mask_response
+            if is_original_batch:  # Only accumulate for original batches
+                total_correct_response += correct_predictions_response.sum().item()
+                total_tokens_response += mask_response.sum().item()
+
+            if is_original_batch:
+                processed_batches += 1
 
         if progress_bar:
-            progress_bar.close()
+            progress_bar.update(1)
 
-        # Calculate token-level accuracy as before
-        # 先把张量搬到 CPU 并转成纯 Python 列表
-        pred_ids = [p.detach().cpu().tolist() for p in all_predictions]  # List[List[int]]
+    if progress_bar:
+        progress_bar.close()
 
-        # 如果 label 是字符串，就可以跳过 decode
-        label_ids = [p.detach().cpu().tolist() for p in all_references]  # List[List[int]]
+    # Calculate token-level accuracies
+    # 先把张量搬到 CPU 并转成纯 Python 列表
+    pred_ids = [p.detach().cpu().tolist() for p in all_predictions]  # List[List[int]]
 
-        # Filter out invalid token IDs to prevent overflow error
-        # Valid token IDs should be in range [0, vocab_size) or -100 (ignored tokens)
-        vocab_size = tokenizer.vocab_size
-        filtered_pred_ids = []
-        filtered_label_ids = []
+    # 如果 label 是字符串，就可以跳过 decode
+    label_ids = [p.detach().cpu().tolist() for p in all_references]  # List[List[int]]
 
-        for pred_seq in pred_ids:
-            filtered_seq = []
-            for token_id in pred_seq:
-                if isinstance(token_id, int) and 0 <= token_id < vocab_size:
-                    filtered_seq.append(token_id)
-                elif isinstance(token_id, int) and token_id == -100:
-                    # Keep -100 tokens but replace with a valid token ID for decoding
-                    # We'll use the pad token ID as a placeholder
-                    filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
-                elif isinstance(token_id, int) and token_id < 0:
-                    # For other negative values, use pad token as placeholder
-                    filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
-                else:
-                    # If it's not an int, try to convert or use pad token
-                    try:
-                        int_token_id = int(token_id)
-                        if 0 <= int_token_id < vocab_size:
-                            filtered_seq.append(int_token_id)
-                        else:
-                            filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
-                    except:
+    # Filter out invalid token IDs to prevent overflow error
+    # Valid token IDs should be in range [0, vocab_size) or -100 (ignored tokens)
+    vocab_size = tokenizer.vocab_size
+    filtered_pred_ids = []
+    filtered_label_ids = []
+
+    for pred_seq in pred_ids:
+        filtered_seq = []
+        for token_id in pred_seq:
+            if isinstance(token_id, int) and 0 <= token_id < vocab_size:
+                filtered_seq.append(token_id)
+            elif isinstance(token_id, int) and token_id == -100:
+                # Keep -100 tokens but replace with a valid token ID for decoding
+                # We'll use the pad token ID as a placeholder
+                filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+            elif isinstance(token_id, int) and token_id < 0:
+                # For other negative values, use pad token as placeholder
+                filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+            else:
+                # If it's not an int, try to convert or use pad token
+                try:
+                    int_token_id = int(token_id)
+                    if 0 <= int_token_id < vocab_size:
+                        filtered_seq.append(int_token_id)
+                    else:
                         filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
-            filtered_pred_ids.append(filtered_seq)
+                except:
+                    filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+        filtered_pred_ids.append(filtered_seq)
 
-        for label_seq in label_ids:
-            filtered_seq = []
-            for token_id in label_seq:
-                if isinstance(token_id, int) and 0 <= token_id < vocab_size:
-                    filtered_seq.append(token_id)
-                elif isinstance(token_id, int) and token_id == -100:
-                    # Keep -100 tokens but replace with a valid token ID for decoding
-                    filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
-                elif isinstance(token_id, int) and token_id < 0:
-                    # For other negative values, use pad token as placeholder
-                    filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
-                else:
-                    # If it's not an int, try to convert or use pad token
-                    try:
-                        int_token_id = int(token_id)
-                        if 0 <= int_token_id < vocab_size:
-                            filtered_seq.append(int_token_id)
-                        else:
-                            filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
-                    except:
+    for label_seq in label_ids:
+        filtered_seq = []
+        for token_id in label_seq:
+            if isinstance(token_id, int) and 0 <= token_id < vocab_size:
+                filtered_seq.append(token_id)
+            elif isinstance(token_id, int) and token_id == -100:
+                # Keep -100 tokens but replace with a valid token ID for decoding
+                # We'll use the pad token ID as a placeholder
+                filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+            elif isinstance(token_id, int) and token_id < 0:
+                # For other negative values, use pad token as placeholder
+                filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+            else:
+                # If it's not an int, try to convert or use pad token
+                try:
+                    int_token_id = int(token_id)
+                    if 0 <= int_token_id < vocab_size:
+                        filtered_seq.append(int_token_id)
+                    else:
                         filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
-            filtered_label_ids.append(filtered_seq)
+                except:
+                    filtered_seq.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+        filtered_label_ids.append(filtered_seq)
 
-        # 用 tokenizer 批量 decode 成字符串
-        # 注意：skip_special_tokens=True 可以去掉 <pad>, <bos>, <eos> 等特殊符号
-        pred_texts = tokenizer.batch_decode(filtered_pred_ids, skip_special_tokens=True)
-        ref_texts  = tokenizer.batch_decode(filtered_label_ids, skip_special_tokens=True)
+    # 用 tokenizer 批量 decode 成字符串
+    # 注意：skip_special_tokens=True 可以去掉 <pad>, <bos>, <eos> 等特殊符号
+    pred_texts = tokenizer.batch_decode(filtered_pred_ids, skip_special_tokens=True)
+    ref_texts  = tokenizer.batch_decode(filtered_label_ids, skip_special_tokens=True)
 
-        # 输出第一个样本的预测和参考文本，用于调试 (only on rank 0)
-        if rank == 0 and len(pred_texts) > 0 and len(ref_texts) > 0:
-            print(f"\n--- First Sample Analysis ---")
-            print(f"Predicted text: {repr(pred_texts[0])}")
-            print(f"Reference text: {repr(ref_texts[0])}")
-            print(f"--- End First Sample Analysis ---\n")
-
+    # 输出第一个样本的预测和参考文本，用于调试 (only on rank 0)
+    if rank == 0 and len(pred_texts) > 0 and len(ref_texts) > 0:
+        print(f"\n--- First Sample Analysis ---")
+        print(f"Predicted text: {repr(pred_texts[0])}")
+        print(f"Reference text: {repr(ref_texts[0])}")
+        print(f"--- End First Sample Analysis ---\n")
 
     model_engine.train()
 
     # Gather totals from all ranks
     device = model_engine.device
-    local_correct = torch.tensor([total_correct], dtype=torch.float32, device=device)
-    local_total = torch.tensor([total_tokens], dtype=torch.float32, device=device)
+    local_correct_full = torch.tensor([total_correct_full], dtype=torch.float32, device=device)
+    local_total_full = torch.tensor([total_tokens_full], dtype=torch.float32, device=device)
+    local_correct_response = torch.tensor([total_correct_response], dtype=torch.float32, device=device)
+    local_total_response = torch.tensor([total_tokens_response], dtype=torch.float32, device=device)
 
     if dist.is_initialized():
-        dist.all_reduce(local_correct, op=dist.ReduceOp.SUM)
-        dist.all_reduce(local_total, op=dist.ReduceOp.SUM)
+        dist.all_reduce(local_correct_full, op=dist.ReduceOp.SUM)
+        dist.all_reduce(local_total_full, op=dist.ReduceOp.SUM)
+        dist.all_reduce(local_correct_response, op=dist.ReduceOp.SUM)
+        dist.all_reduce(local_total_response, op=dist.ReduceOp.SUM)
 
-    if local_total.item() == 0:
-        return 0.0  # Return 0 accuracy if no valid tokens
+    # Calculate accuracies
+    if local_total_full.item() == 0:
+        accuracy_full = 0.0  # Return 0 accuracy if no valid tokens
+    else:
+        accuracy_full = (local_correct_full / local_total_full).item()
 
-    accuracy = (local_correct / local_total).item()
+    if local_total_response.item() == 0:
+        accuracy_response = 0.0  # Return 0 accuracy if no valid tokens
+    else:
+        accuracy_response = (local_correct_response / local_total_response).item()
 
     # Print token counts on rank 0
     if rank == 0:
-        print(f"Correctly predicted tokens: {int(local_correct.item())}")
-        print(f"Total tokens to predict: {int(local_total.item())}")
-        print(f"Accuracy: {accuracy:.6f}")
+        print(f"Full Sequence - Correctly predicted tokens: {int(local_correct_full.item())}")
+        print(f"Full Sequence - Total tokens to predict: {int(local_total_full.item())}")
+        print(f"Full Sequence Accuracy: {accuracy_full:.6f}")
+        print(f"Response Only - Correctly predicted tokens: {int(local_correct_response.item())}")
+        print(f"Response Only - Total tokens to predict: {int(local_total_response.item())}")
+        print(f"Response Only Accuracy: {accuracy_response:.6f}")
 
-    return accuracy
+    return accuracy_full, accuracy_response
 
 
 def calculate_accuracy_detailed(model_engine, eval_dataloader, tokenizer):
@@ -1030,9 +1067,10 @@ def main(args):
     if args.calc_accuracy:
         if dist.get_rank() == 0:
             print("Calculating baseline accuracy before training...")
-        baseline_accuracy = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
+        baseline_accuracy_full, baseline_accuracy_response = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
         if dist.get_rank() == 0:
-            print(f"Baseline accuracy before training: {baseline_accuracy:.4f}")
+            print(f"Baseline full sequence accuracy before training: {baseline_accuracy_full:.4f}")
+            print(f"Baseline response-only accuracy before training: {baseline_accuracy_response:.4f}")
 
     # Sample test examples for comparison
     # if dist.get_rank() == 0:
@@ -1181,13 +1219,16 @@ def main(args):
     if args.calc_accuracy:
         if dist.get_rank() == 0:
             print("Calculating final accuracy after training...")
-        final_accuracy = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
+        final_accuracy_full, final_accuracy_response = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
         if dist.get_rank() == 0:
-            print(f"Final accuracy after training: {final_accuracy:.4f}")
+            print(f"Final full sequence accuracy after training: {final_accuracy_full:.4f}")
+            print(f"Final response-only accuracy after training: {final_accuracy_response:.4f}")
 
         # Calculate accuracy improvement if baseline accuracy is available
-        if 'baseline_accuracy' in locals() and dist.get_rank() == 0:
-            print(f"Accuracy improvement: {final_accuracy - baseline_accuracy:.4f}")
+        if 'baseline_accuracy_full' in locals() and dist.get_rank() == 0:
+            print(f"Full sequence accuracy improvement: {final_accuracy_full - baseline_accuracy_full:.4f}")
+        if 'baseline_accuracy_response' in locals() and dist.get_rank() == 0:
+            print(f"Response-only accuracy improvement: {final_accuracy_response - baseline_accuracy_response:.4f}")
 
 
 if __name__ == "__main__":
