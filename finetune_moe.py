@@ -525,33 +525,24 @@ def calculate_accuracy(model_engine, eval_dataloader, tokenizer):
                 all_predictions.append(predictions[i])
                 all_references.append(labels[i])
 
-            # Create mask for full sequence (all tokens that are not -100)
-            mask_full = labels != -100  # -100 is used for ignored tokens in labels
+            # Get input_ids for full sequence comparison
+            input_ids = batch["input_ids"]
 
-            # Count correct predictions for full sequence
-            correct_predictions_full = (predictions == labels) & mask_full
+            # Create mask for full sequence (all non-padding tokens)
+            # This includes instruction, input, and response parts
+            mask_full = input_ids != tokenizer.pad_token_id  # Use input_ids to identify all non-padding tokens
+
+            # Count correct predictions for full sequence (comparing predictions with input_ids)
+            correct_predictions_full = (predictions == input_ids) & mask_full
             if is_original_batch:  # Only accumulate for original batches
                 total_correct_full += correct_predictions_full.sum().item()
                 total_tokens_full += mask_full.sum().item()
 
-            # For response-only accuracy, we need to identify the response part separately
+            # For response-only accuracy, we only consider the response part
             # In our preprocessing, only the response part has non-masked tokens (not -100)
-            # So we need to identify the response part by finding where it starts in the sequence
-            mask_response = torch.zeros_like(labels, dtype=torch.bool)
-
-            # For each sequence in the batch, identify the response part
-            # We'll use the fact that in our preprocessing, the response part comes after "### Response:\n"
-            # and we can identify it by looking for the first non-masked (-100) token after the masked ones
-            for batch_i in range(labels.size(0)):
-                # Find the first non-masked token (not -100) which should be the start of response
-                # In our preprocessing, instruction and input parts are masked with -100
-                # and only the response part contains actual token IDs
-                for idx in range(len(labels[batch_i])):
-                    if labels[batch_i][idx] != -100:  # This is part of the response
-                        mask_response[batch_i][idx] = True
-
-            # Count correct predictions for response part only
-            correct_predictions_response = (predictions == labels) & mask_response
+            # So mask_response is the same as mask_full in our current setup, but conceptually different
+            mask_response = labels != -100  # -100 is used for ignored tokens in labels
+            correct_predictions_response = (predictions == labels) & mask_response  # Compare with labels for response part only
             if is_original_batch:  # Only accumulate for original batches
                 total_correct_response += correct_predictions_response.sum().item()
                 total_tokens_response += mask_response.sum().item()
@@ -803,20 +794,20 @@ def calculate_accuracy_detailed(model_engine, eval_dataloader, tokenizer):
                 all_predictions.append(predictions[i])
                 all_references.append(labels[i])
 
-            # Create mask for full sequence (all tokens that are not -100)
-            mask_full = labels != -100  # -100 is used for ignored tokens in labels
+            # Create mask for full sequence (all non-padding tokens)
+            # This includes instruction, input, and response parts
+            mask_full = input_ids != tokenizer.pad_token_id  # Use input_ids to identify all non-padding tokens
 
             # Count correct predictions for full sequence
-            correct_predictions_full = (predictions == labels) & mask_full
+            correct_predictions_full = (predictions == input_ids) & mask_full  # Compare with input_ids for full sequence
             if is_original_batch:  # Only accumulate for original batches
                 total_correct_full += correct_predictions_full.sum().item()
                 total_tokens_full += mask_full.sum().item()
 
             # For response-only accuracy, we only consider the response part
-            # In our current setup, non-masked tokens (not -100) are the response tokens
-            # So response mask is the same as full mask
-            mask_response = mask_full
-            correct_predictions_response = (predictions == labels) & mask_response
+            # In our current setup, non-masked tokens in labels (not -100) are the response tokens
+            mask_response = labels != -100  # -100 is used for ignored tokens in labels
+            correct_predictions_response = (predictions == labels) & mask_response  # Compare with labels for response part only
             if is_original_batch:  # Only accumulate for original batches
                 total_correct_response += correct_predictions_response.sum().item()
                 total_tokens_response += mask_response.sum().item()
