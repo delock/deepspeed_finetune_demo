@@ -36,307 +36,8 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-# def analyze_gate_outputs(model_engine, eval_dataloader, tokenizer, step_name="before_training"):
-#     """
-#     Analyze the gate outputs of the MoE model.
-#
-#     Args:
-#         model_engine: The DeepSpeed model engine
-#         eval_dataloader: Dataloader for evaluation data
-#         tokenizer: Tokenizer for processing text
-#         step_name: Name to identify the analysis step (e.g., 'before_training', 'after_training')
-#
-#     Returns:
-#         Dictionary containing analysis results
-#     """
-#     import torch
-#     from tqdm import tqdm
-#     from deepspeed import comm as dist
-#
-#     # Dictionary to store gate outputs
-#     gate_outputs = {}
-#
-#     # Find all modules with 'gate' in their name and register hooks to capture their outputs
-#     def register_gate_hooks(model):
-#         hooks_registered = []
-#         for name, module in model.named_modules():
-#             if 'gate' in name.lower() and not 'gate_proj' in name.lower():
-#                 def make_hook(n):
-#                     def hook_fn(module, input, output):
-#                         # Store the output of the gate layer
-#                         if n not in gate_outputs:
-#                             gate_outputs[n] = []
-#                         # Detach from computation graph and move to CPU for storage
-#                         if isinstance(output, torch.Tensor):
-#                             gate_outputs[n].append(output.detach().cpu())
-#                         elif isinstance(output, tuple):
-#                             # If output is a tuple (like from some activation functions), take the first tensor
-#                             if len(output) > 0 and isinstance(output[0], torch.Tensor):
-#                                 gate_outputs[n].append(output[0].detach().cpu())
-#                     return hook_fn
-#
-#                 hook = module.register_forward_hook(make_hook(name))
-#                 hooks_registered.append((name, hook))
-#         return hooks_registered
-#
-#     # Store original training state
-#     was_training = model_engine.training
-#
-#     # Register hooks only during analysis
-#     model_to_analyze = model_engine.module if hasattr(model_engine, 'module') else model_engine
-#     registered_hooks = register_gate_hooks(model_to_analyze)
-#
-#     try:
-#         model_engine.eval()
-#         world_size = dist.get_world_size() if dist.is_initialized() else 1
-#         rank = dist.get_rank() if dist.is_initialized() else 0
-#
-#         with torch.no_grad():
-#             # Process a few batches to collect gate outputs
-#             for batch_idx, batch in enumerate(tqdm(eval_dataloader, desc=f"Collecting gate outputs [{step_name}]") if rank == 0 else eval_dataloader):
-#                 if batch_idx >= 5:  # Limit to first 5 batches to reduce impact on performance
-#                     break
-#                 if batch_idx % world_size != rank:
-#                     continue
-#
-#                 batch = {k: v.to(model_engine.device) for k, v in batch.items()}
-#                 outputs = model_engine(**batch)
-#                 # We only need the forward pass to trigger the hooks, not the output
-#     finally:
-#         # Remove hooks immediately after analysis - ensure they're always removed
-#         for name, hook in registered_hooks:
-#             hook.remove()
-#
-#         # Restore original training state
-#         if was_training:
-#             model_engine.train()
-#
-#     # Analyze the collected gate outputs
-#     analysis_results = {}
-#
-#     for gate_name, outputs_list in gate_outputs.items():
-#         if len(outputs_list) == 0:
-#             continue
-#
-#         # Concatenate all outputs for this gate
-#         all_outputs = torch.cat(outputs_list, dim=0)
-#
-#         # Calculate statistics
-#         mean_output = all_outputs.mean().item()
-#         std_output = all_outputs.std().item()
-#         min_output = all_outputs.min().item()
-#         max_output = all_outputs.max().item()
-#
-#         # Calculate activation statistics
-#         num_total_elements = all_outputs.numel()
-#         num_activated = (all_outputs != 0).sum().item()
-#         activation_ratio = num_activated / num_total_elements if num_total_elements > 0 else 0
-#
-#         analysis_results[gate_name] = {
-#             'mean': mean_output,
-#             'std': std_output,
-#             'min': min_output,
-#             'max': max_output,
-#             'activation_ratio': activation_ratio,
-#             'shape': list(all_outputs.shape)
-#         }
-#
-#     # Clear the gate_outputs to free memory
-#     gate_outputs.clear()
-#
-#     # Print summary
-#     if rank == 0:
-#         print(f"\n=== Gate Output Analysis - {step_name} ===")
-#         for gate_name, stats in analysis_results.items():
-#             print(f"Gate: {gate_name}")
-#             print(f"  Shape: {stats['shape']}")
-#             print(f"  Mean: {stats['mean']:.6f}")
-#             print(f"  Std: {stats['std']:.6f}")
-#             print(f"  Min: {stats['min']:.6f}")
-#             print(f"  Max: {stats['max']:.6f}")
-#             print(f"  Activation Ratio: {stats['activation_ratio']:.6f}")
-#             print()
-#
-#     return analysis_results
-#
-#
-# def compare_gate_analysis(before_results, after_results):
-#     """
-#     Compare gate analysis results before and after fine-tuning.
-#
-#     Args:
-#         before_results: Analysis results from before fine-tuning
-#         after_results: Analysis results from after fine-tuning
-#
-#     Returns:
-#         Dictionary with comparison results
-#     """
-#     from deepspeed import comm as dist
-#
-#     rank = dist.get_rank() if dist.is_initialized() else 0
-#
-#     comparison_results = {}
-#
-#     # Find common gate names in both results
-#     common_gates = set(before_results.keys()) & set(after_results.keys())
-#
-#     for gate_name in common_gates:
-#         before_stats = before_results[gate_name]
-#         after_stats = after_results[gate_name]
-#
-#         comparison_results[gate_name] = {
-#             'mean_change': after_stats['mean'] - before_stats['mean'],
-#             'std_change': after_stats['std'] - before_stats['std'],
-#             'min_change': after_stats['min'] - before_stats['min'],
-#             'max_change': after_stats['max'] - before_stats['max'],
-#             'activation_ratio_change': after_stats['activation_ratio'] - before_stats['activation_ratio'],
-#             'before': before_stats,
-#             'after': after_stats
-#         }
-#
-#     # Print comparison summary
-#     if rank == 0:
-#         print("\n=== Gate Output Changes After Fine-tuning ===")
-#         for gate_name, comparison in comparison_results.items():
-#             print(f"Gate: {gate_name}")
-#             print(f"  Mean Change: {comparison['mean_change']:.6f}")
-#             print(f"  Std Change: {comparison['std_change']:.6f}")
-#             print(f"  Min Change: {comparison['min_change']:.6f}")
-#             print(f"  Max Change: {comparison['max_change']:.6f}")
-#             print(f"  Activation Ratio Change: {comparison['activation_ratio_change']:.6f}")
-#             print()
-#
-#     return comparison_results
 
 
-def sample_test_examples(test_dataset, tokenizer, num_samples=10, seed=42):
-    """
-    Sample random examples from test dataset for comparison.
-
-    Args:
-        test_dataset: The test dataset
-        tokenizer: The tokenizer
-        num_samples: Number of samples to take (default 10)
-        seed: Random seed for reproducibility
-
-    Returns:
-        List of dictionaries containing input text and labels
-    """
-    import random
-    from tqdm import tqdm
-    random.seed(seed)
-
-    # Randomly sample indices
-    sampled_indices = random.sample(range(len(test_dataset)), num_samples)
-
-    samples = []
-    for idx in tqdm(sampled_indices, desc="Sampling test examples", total=num_samples):
-        example = test_dataset[idx]
-
-        # Reconstruct the input text from the example
-        prompt = f"### Instruction:\n{example['instruction']}\n\n"
-        if example.get("input", ""):
-            prompt += f"### Input:\n{example['input']}\n\n"
-        prompt += f"### Response:\n"
-
-        # Get the full response (ground truth)
-        full_prompt = f"### Instruction:\n{example['instruction']}\n\n"
-        if example.get("input", ""):
-            full_prompt += f"### Input:\n{example['input']}\n\n"
-        full_prompt += f"### Response:\n{example['output']}"
-
-        samples.append({
-            'input_text': prompt,
-            'full_text': full_prompt,
-            'ground_truth': example['output'],
-            'original_idx': idx
-        })
-
-    return samples
-
-
-def generate_model_outputs(model_engine, samples, tokenizer, max_new_tokens=256):
-    """
-    Generate outputs from the model for the given samples using forward pass.
-    This function gets the model's response to the input by using the logits
-    from the forward pass. For efficiency, we only perform a single forward pass
-    and return the logits for the last token position.
-
-    Args:
-        model_engine: The DeepSpeed model engine
-        samples: List of sample dictionaries
-        tokenizer: The tokenizer
-        max_new_tokens: Maximum number of new tokens to generate (not used in forward pass)
-
-    Returns:
-        List of generated outputs
-    """
-    import torch
-    from deepspeed import comm as dist
-    from tqdm import tqdm
-
-    rank = dist.get_rank() if dist.is_initialized() else 0
-
-    # Store original training state
-    was_training = model_engine.training
-    model_engine.eval()
-
-    generated_outputs = []
-
-    # Use tqdm for progress bar if on rank 0
-    sample_iterator = tqdm(enumerate(samples), total=len(samples), desc="Generating outputs", disable=(rank != 0))
-
-    for i, sample in sample_iterator:
-        # Tokenize input
-        inputs = tokenizer(sample['input_text'], return_tensors="pt", truncation=True, padding=True)
-        input_ids = inputs["input_ids"].to(model_engine.device)
-
-        # Use forward pass to get logits
-        with torch.no_grad():
-            outputs = model_engine(input_ids=input_ids)
-            logits = outputs.logits
-
-        # Get the predicted token for the next position (after the last input token)
-        next_token_logits = logits[:, -1, :]  # Get logits for the next token
-        next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
-
-        # Decode the single predicted token
-        predicted_text = tokenizer.decode(next_token_id[0], skip_special_tokens=True)
-
-        generated_outputs.append(predicted_text)
-
-    # Restore original training state
-    if was_training:
-        model_engine.train()
-
-    return generated_outputs
-
-
-def format_comparison_output(samples, before_outputs, after_outputs):
-    """
-    Format the comparison output in a human-readable format.
-
-    Args:
-        samples: List of sample dictionaries
-        before_outputs: List of outputs before training
-        after_outputs: List of outputs after training
-    """
-    print("\n" + "="*80)
-    print("MoE Model Output Comparison - Sample Analysis")
-    print("="*80)
-    print()
-
-    for i, (sample, before_out, after_out) in enumerate(zip(samples, before_outputs, after_outputs)):
-        print(f"Sample #{i+1}:")
-        print(f"Input: {repr(sample['input_text'])}")
-        print("-" * 80)
-        print(f"BEFORE Training: {repr(before_out)}")
-        print("-" * 80)
-        print(f"AFTER Training:  {repr(after_out)}")
-        print("-" * 80)
-        print(f"GROUND TRUTH:    {repr(sample['ground_truth'])}")
-        print("=" * 80)
-        print()
 
 
 def preprocess_alpaca(example, tokenizer, max_length=512, mask_instruction_input=True):
@@ -449,6 +150,139 @@ def evaluate(model_engine, eval_dataloader):
     avg_loss = (local_sum / local_count).item()
 
     return avg_loss, None
+
+# Gate analysis functions (commented out as per requirements)
+'''
+def analyze_gate_outputs(model, tokenizer, test_samples, device="cuda"):
+    """
+    Analyze the gate outputs of a MoE model to understand expert selection patterns.
+
+    Args:
+        model: The MoE model
+        tokenizer: The tokenizer
+        test_samples: List of test samples to analyze
+        device: Device to run the analysis on
+
+    Returns:
+        Dictionary containing analysis results
+    """
+    import torch
+    import numpy as np
+    from collections import defaultdict
+
+    model.eval()
+    gate_analysis_results = {
+        'expert_usage_counts': defaultdict(int),
+        'average_router_probs': [],
+        'routing_entropy': [],
+        'sample_by_sample_analysis': []
+    }
+
+    with torch.no_grad():
+        for i, sample in enumerate(test_samples):
+            # Tokenize input
+            inputs = tokenizer(sample['input_text'], return_tensors="pt", truncation=True, padding=True)
+            input_ids = inputs["input_ids"].to(device)
+
+            # Forward pass to get model outputs
+            outputs = model(input_ids=input_ids)
+
+            # Look for router/gate outputs in the model
+            # This varies depending on the specific MoE implementation
+            hidden_states = outputs.hidden_states if hasattr(outputs, 'hidden_states') else None
+
+            # Try to access router logits if available in the model output
+            if hasattr(outputs, 'router_logits'):
+                router_logits = outputs.router_logits  # Tuple of tensors for each layer
+
+                for layer_idx, layer_router_logits in enumerate(router_logits):
+                    # Apply softmax to get probabilities
+                    router_probs = torch.softmax(layer_router_logits, dim=-1)
+
+                    # Calculate routing entropy (measure of uncertainty in expert selection)
+                    entropy = -torch.sum(router_probs * torch.log(router_probs + 1e-10), dim=-1)
+                    gate_analysis_results['routing_entropy'].extend(entropy.cpu().numpy())
+
+                    # Get selected experts (top-k for each token)
+                    top_k_vals, top_k_indices = torch.topk(router_probs, k=min(2, router_probs.size(-1)), dim=-1)
+
+                    # Count expert usage
+                    flat_indices = top_k_indices.view(-1).cpu().numpy()
+                    for exp_id in flat_indices:
+                        gate_analysis_results['expert_usage_counts'][exp_id] += 1
+
+                # Calculate average router probabilities
+                avg_probs = torch.mean(torch.cat([torch.softmax(logit, dim=-1) for logit in router_logits]), dim=0)
+                gate_analysis_results['average_router_probs'].append(avg_probs.cpu().numpy())
+
+            # Store sample-specific analysis
+            sample_analysis = {
+                'sample_idx': i,
+                'input_length': len(input_ids[0]),
+                'selected_experts': [] if not hasattr(outputs, 'router_logits') else
+                                  [logit.topk(k=min(2, logit.size(-1)), dim=-1)[1].cpu().numpy()
+                                   for logit in outputs.router_logits]
+            }
+            gate_analysis_results['sample_by_sample_analysis'].append(sample_analysis)
+
+    return gate_analysis_results
+
+
+def compare_gate_analysis(before_training_analysis, after_training_analysis):
+    """
+    Compare gate analysis results before and after training.
+
+    Args:
+        before_training_analysis: Gate analysis results before training
+        after_training_analysis: Gate analysis results after training
+
+    Returns:
+        Dictionary containing comparison results
+    """
+    comparison_results = {}
+
+    # Compare expert usage patterns
+    before_expert_counts = before_training_analysis.get('expert_usage_counts', {})
+    after_expert_counts = after_training_analysis.get('expert_usage_counts', {})
+
+    # Calculate expert utilization statistics
+    all_experts = set(list(before_expert_counts.keys()) + list(after_expert_counts.keys()))
+
+    expert_usage_comparison = {}
+    for expert_id in all_experts:
+        before_count = before_expert_counts.get(expert_id, 0)
+        after_count = after_expert_counts.get(expert_id, 0)
+        expert_usage_comparison[expert_id] = {
+            'before': before_count,
+            'after': after_count,
+            'change': after_count - before_count,
+            'change_percentage': ((after_count - before_count) / (before_count + 1e-10)) * 100
+        }
+
+    comparison_results['expert_usage_comparison'] = expert_usage_comparison
+
+    # Compare routing entropy
+    before_entropy = before_training_analysis.get('routing_entropy', [])
+    after_entropy = after_training_analysis.get('routing_entropy', [])
+
+    comparison_results['entropy_stats'] = {
+        'before_mean': np.mean(before_entropy) if before_entropy else 0,
+        'after_mean': np.mean(after_entropy) if after_entropy else 0,
+        'before_std': np.std(before_entropy) if before_entropy else 0,
+        'after_std': np.std(after_entropy) if after_entropy else 0
+    }
+
+    # Compare average router probabilities
+    before_avg_probs = before_training_analysis.get('average_router_probs', [])
+    after_avg_probs = after_training_analysis.get('average_router_probs', [])
+
+    comparison_results['probability_comparison'] = {
+        'before_shape': [p.shape for p in before_avg_probs],
+        'after_shape': [p.shape for p in after_avg_probs]
+    }
+
+    return comparison_results
+'''
 
 def main(args):
     logging.basicConfig(level=logging.INFO, filename='pytorch_log.txt')
@@ -571,24 +405,9 @@ def main(args):
     print (model)
 
 
-    # Sample test examples for comparison
-    # if dist.get_rank() == 0:
-    #     print("Sampling test examples for comparison...")
-    # test_samples = sample_test_examples(test_dataset, tokenizer, num_samples=10, seed=args.seed)
-    #
-    # # Generate outputs before training
-    # # if dist.get_rank() == 0:
-    # #     print("Generating outputs before training...")
-    # # before_training_outputs = generate_model_outputs(model_engine, test_samples, tokenizer)
-
     # Skip sampling and generation for now to speed up training
     test_samples = []
     before_training_outputs = []
-
-    # Perform gate output analysis before fine-tuning
-    # if dist.get_rank() == 0:
-    #     print("Performing gate output analysis before fine-tuning...")
-    # gate_analysis_before = analyze_gate_outputs(model_engine, test_dataloader, tokenizer, step_name="before_training")
 
     model_engine.train()
     global_step = 0
@@ -670,31 +489,6 @@ def main(args):
     if args.bench_start >= 0 and args.bench_steps > 0:
         if dist.get_rank() == 0:
             print (f"Average iteration time = {total_time/total_count}")
-
-    #eval_loss, eval_accuracy = evaluate(model_engine, eval_dataloader)
-    #print (f"Eval loss {eval_loss} @ global_samples {global_samples}")
-    # Generate outputs after training
-    # if dist.get_rank() == 0:
-    #     print("Generating outputs after training...")
-    # after_training_outputs = generate_model_outputs(model_engine, test_samples, tokenizer)
-    #
-    # # Format comparison output
-    # # if dist.get_rank() == 0:
-    # #     print("Formatting comparison output...")
-    # # format_comparison_output(test_samples, before_training_outputs, after_training_outputs)
-
-    # Skip comparison for now to speed up training
-    print("Skipping comparison output for training run")
-
-    # Perform gate output analysis after fine-tuning
-    # if dist.get_rank() == 0:
-    #     print("Performing gate output analysis after fine-tuning...")
-    # gate_analysis_after = analyze_gate_outputs(model_engine, test_dataloader, tokenizer, step_name="after_training")
-
-    # Compare gate analysis results
-    # if dist.get_rank() == 0:
-    #     print("Comparing gate output changes...")
-    # gate_comparison = compare_gate_analysis(gate_analysis_before, gate_analysis_after)
 
     # Save model using DeepSpeed's save_checkpoint method
     #model_engine.save_checkpoint(f"{args.output_dir}{dist.get_rank()}")
