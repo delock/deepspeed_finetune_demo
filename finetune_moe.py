@@ -607,7 +607,8 @@ def main(args):
     global_samples = 0
     #for epoch in range(args.num_train_epochs):
     eval_loss, eval_accuracy = evaluate(model_engine, eval_dataloader)
-    print (f"Eval loss {eval_loss} @ global_samples {global_samples}")
+    if dist.get_rank() == 0:
+        print (f"Eval loss {eval_loss} @ global_samples {global_samples}")
     epoch = 1
     while True:
         if dist.get_rank() == 0:
