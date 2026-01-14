@@ -650,10 +650,11 @@ def main(args):
             if dist.get_rank() == 0 and global_step%10==0:  # Print every 10 steps
                 print(f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time*1000:.0f}ms")
 
-            if global_samples == 512 or global_samples == 2048 or global_samples == 8192 or global_samples == 32768:
+            # Evaluate based on eval_steps parameter instead of hardcoded points
+            if args.eval_steps > 0 and global_step > 0 and global_step % args.eval_steps == 0:
                 eval_loss, eval_accuracy = evaluate(model_engine, eval_dataloader)
                 if dist.get_rank() == 0:
-                    print (f"Eval loss {eval_loss} @ global_samples {global_samples}")
+                    print (f"Eval loss {eval_loss} @ global_step {global_step}, global_samples {global_samples}")
             global_step += 1
             if prof != None:
                 prof.step()
