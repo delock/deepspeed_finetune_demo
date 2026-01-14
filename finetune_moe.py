@@ -458,6 +458,10 @@ def main(args):
     with open(args.deepspeed_config, "r") as f:
         ds_config = json.load(f)
     ds_config["train_batch_size"] = args.batch_size
+
+    # Extract micro batch size per gpu from config to use for evaluation
+    train_micro_batch_size_per_gpu = ds_config.get("train_micro_batch_size_per_gpu", 1)
+
     delattr(args, "deepspeed_config")
 
     dschf=HfDeepSpeedConfig(ds_config)
@@ -542,13 +546,13 @@ def main(args):
     )
     eval_dataloader = DataLoader(
         tokenized_eval_dataset,
-        batch_size=1,  # small eval batch for stability
+        batch_size=train_micro_batch_size_per_gpu,  # Use same micro batch size as training for efficiency
         collate_fn=default_data_collator,
         shuffle=False
     )
     test_dataloader = DataLoader(
         tokenized_test_dataset,
-        batch_size=1,  # small eval batch for stability
+        batch_size=train_micro_batch_size_per_gpu,  # Use same micro batch size as training for efficiency
         collate_fn=default_data_collator,
         shuffle=False
     )
