@@ -387,7 +387,8 @@ def preprocess_alpaca(example, tokenizer, max_length=512, mask_instruction_input
         response_start_idx = instruction_len + input_len
         response_end_idx = min(response_start_idx + response_len, len(tokenized["input_ids"]))
 
-        for i in range(response_start_idx, response_end_idx):
+        #for i in range(response_start_idx, response_end_idx):
+        for i in range(0, response_end_idx):
             if i < len(tokenized["input_ids"]):
                 labels[i] = tokenized["input_ids"][i]
 
@@ -1055,13 +1056,13 @@ def main(args):
     print (model)
 
     # Calculate baseline accuracy before training
-    if args.calc_accuracy:
-        if dist.get_rank() == 0:
-            print("Calculating baseline accuracy before training...")
-        baseline_accuracy_full, baseline_accuracy_response = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
-        if dist.get_rank() == 0:
-            print(f"Baseline full sequence accuracy before training: {baseline_accuracy_full:.4f}")
-            print(f"Baseline response-only accuracy before training: {baseline_accuracy_response:.4f}")
+    #if args.calc_accuracy:
+        #if dist.get_rank() == 0:
+            #print("Calculating baseline accuracy before training...")
+        #baseline_accuracy_full, baseline_accuracy_response = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
+        #if dist.get_rank() == 0:
+            #print(f"Baseline full sequence accuracy before training: {baseline_accuracy_full:.4f}")
+            #print(f"Baseline response-only accuracy before training: {baseline_accuracy_response:.4f}")
 
     # Sample test examples for comparison
     # if dist.get_rank() == 0:
@@ -1114,6 +1115,8 @@ def main(args):
         #if dist.get_rank() == 0:
             #print(f"[Eval @ step before train] Average eval loss: {eval_loss:.4f}")
     #for epoch in range(args.num_train_epochs):
+    eval_loss, eval_accuracy = evaluate(model_engine, eval_dataloader)
+    print (f"Eval loss {eval_loss} @ global_samples {global_samples}")
     epoch = 1
     while True:
         if dist.get_rank() == 0:
@@ -1131,6 +1134,8 @@ def main(args):
                     print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
             step_start_time = time.time()
             batch = {k: v.to(model_engine.device) for k, v in batch.items()}
+            if (global_samples == 0 and dist.get_rank() == 0):
+                print (batch)
             outputs = model_engine(**batch)
             loss = outputs.loss
 
@@ -1149,6 +1154,10 @@ def main(args):
             if dist.get_rank() == 0 and global_step%10==0:  # Print every 10 steps
                 print(f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time*1000:.0f}ms")
 
+            if global_samples == 512 or global_samples == 2048 or global_samples == 8192 or global_samples == 32768:
+                eval_loss, eval_accuracy = evaluate(model_engine, eval_dataloader)
+                if dist.get_rank() == 0:
+                    print (f"Eval loss {eval_loss} @ global_samples {global_samples}")
             # Evaluation after every eval_steps
             #if args.eval_steps > 0 and global_step % args.eval_steps == 0 and global_step !=0:
                 #eval_loss, eval_accuracy = evaluate(model_engine, eval_dataloader, calc_accuracy=args.calc_accuracy)
@@ -1178,6 +1187,8 @@ def main(args):
         if dist.get_rank() == 0:
             print (f"Average iteration time = {total_time/total_count}")
 
+    #eval_loss, eval_accuracy = evaluate(model_engine, eval_dataloader)
+    #print (f"Eval loss {eval_loss} @ global_samples {global_samples}")
     # Generate outputs after training
     # if dist.get_rank() == 0:
     #     print("Generating outputs after training...")
@@ -1207,19 +1218,19 @@ def main(args):
     #print("Model saved.")
 
     # Calculate final accuracy after training
-    if args.calc_accuracy:
-        if dist.get_rank() == 0:
-            print("Calculating final accuracy after training...")
-        final_accuracy_full, final_accuracy_response = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
-        if dist.get_rank() == 0:
-            print(f"Final full sequence accuracy after training: {final_accuracy_full:.4f}")
-            print(f"Final response-only accuracy after training: {final_accuracy_response:.4f}")
+    #if args.calc_accuracy:
+        #if dist.get_rank() == 0:
+            #print("Calculating final accuracy after training...")
+        #final_accuracy_full, final_accuracy_response = calculate_accuracy(model_engine, test_dataloader, tokenizer)  # Limit batches for speed
+        #if dist.get_rank() == 0:
+            #print(f"Final full sequence accuracy after training: {final_accuracy_full:.4f}")
+            #print(f"Final response-only accuracy after training: {final_accuracy_response:.4f}")
 
-        # Calculate accuracy improvement if baseline accuracy is available
-        if 'baseline_accuracy_full' in locals() and dist.get_rank() == 0:
-            print(f"Full sequence accuracy improvement: {final_accuracy_full - baseline_accuracy_full:.4f}")
-        if 'baseline_accuracy_response' in locals() and dist.get_rank() == 0:
-            print(f"Response-only accuracy improvement: {final_accuracy_response - baseline_accuracy_response:.4f}")
+        ## Calculate accuracy improvement if baseline accuracy is available
+        #if 'baseline_accuracy_full' in locals() and dist.get_rank() == 0:
+            #print(f"Full sequence accuracy improvement: {final_accuracy_full - baseline_accuracy_full:.4f}")
+        #if 'baseline_accuracy_response' in locals() and dist.get_rank() == 0:
+            #print(f"Response-only accuracy improvement: {final_accuracy_response - baseline_accuracy_response:.4f}")
 
 
 if __name__ == "__main__":
