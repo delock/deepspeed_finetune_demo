@@ -491,9 +491,10 @@ def main(args):
             print (f"Average iteration time = {total_time/total_count}")
 
     # Save model using DeepSpeed's save_checkpoint method
-    #model_engine.save_checkpoint(f"{args.output_dir}{dist.get_rank()}")
-    #tokenizer.save_pretrained(f"{args.output_dir}{dist.get_rank()}")
-    #print("Model saved.")
+    model_engine.save_checkpoint(f"{args.output_dir}/checkpoint_rank_{dist.get_rank()}")
+    if dist.get_rank() == 0:
+        tokenizer.save_pretrained(f"{args.output_dir}/tokenizer")
+        print("Model saved.")
 
 
 
