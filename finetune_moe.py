@@ -490,14 +490,58 @@ def main(args):
         if dist.get_rank() == 0:
             print (f"Average iteration time = {total_time/total_count}")
 
-    # Save model using DeepSpeed's save_checkpoint method
-    checkpoint_path = f"{args.output_dir}/checkpoint_rank_{dist.get_rank()}"
+    # Save model using DeepSpeed's save_checkpoint method to a common directory
+    # All ranks save to the same checkpoint directory for proper ZeRO-3 compatibility
+    checkpoint_path = f"{args.output_dir}/checkpoint"
     model_engine.save_checkpoint(checkpoint_path)
     if dist.get_rank() == 0:
+        # Only rank 0 saves tokenizer to avoid conflicts
         tokenizer_path = f"{args.output_dir}/tokenizer"
         tokenizer.save_pretrained(tokenizer_path)
         print(f"Checkpoint saved to: {checkpoint_path}")
         print(f"Tokenizer saved to: {tokenizer_path}")
+
+    # Synchronize all ranks after saving checkpoints
+    if dist.is_initialized():
+        dist.barrier()
+
+    # Only convert on rank 0 after all ranks have saved their checkpoints
+    if dist.get_rank() == 0:
+        print("Converting DeepSpeed checkpoint to HuggingFace format...")
+
+        # Import required modules inside the conditional block
+        import os
+        from deepspeed.utils.zero_to_fp32 import convert_zero_checkpoint_to_fp32_state_dict
+
+        # Create HF format output directory
+        hf_output_dir = f"{args.output_dir}_hf"
+        os.makedirs(hf_output_dir, exist_ok=True)
+
+        try:
+            # Execute conversion - second parameter is output directory
+            # The checkpoint_path now contains all rank checkpoints in the same directory
+            convert_zero_checkpoint_to_fp32_state_dict(
+                checkpoint_path,  # Use the common checkpoint directory
+                hf_output_dir
+            )
+
+            # Copy tokenizer and config files from original model
+            original_tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+            original_tokenizer.save_pretrained(hf_output_dir)
+
+            original_config = AutoConfig.from_pretrained(args.model_name)
+            original_config.save_pretrained(hf_output_dir)
+
+            print(f"HuggingFace format model saved to: {hf_output_dir}")
+
+        except Exception as e:
+            print(f"Error during conversion: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    # Synchronize all ranks after conversion
+    if dist.is_initialized():
+        dist.barrier()
 
 
 
@@ -528,3 +572,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(args)
+
+
