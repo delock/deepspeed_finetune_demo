@@ -339,7 +339,6 @@ def main(args):
     # Load dataset from JSON file (Alpaca dataset loading removed)
     if args.dataset:
         # Load custom dataset from JSON file
-        import json
         with open(args.dataset, 'r', encoding='utf-8') as f:
             raw_data = json.load(f)
 
