@@ -1,0 +1,52 @@
+[
+    {
+        "instruction": "Translate the following English text to French.",
+        "input": "Hello, how are you?",
+        "output": "Bonjour, comment allez-vous?"
+    },
+    {
+        "instruction": "Summarize the following paragraph in one sentence.",
+        "input": "Machine learning is a subset of artificial intelligence that enables computers to learn and make decisions from data without being explicitly programmed. It uses algorithms to identify patterns in data and makes decisions based on those patterns.",
+        "output": "Machine learning allows computers to learn from data and make decisions without explicit programming."
+    },
+    {
+        "instruction": "Explain quantum computing in simple terms.",
+        "input": "",
+        "output": "Quantum computing uses quantum bits (qubits) that can exist in multiple states simultaneously, allowing for parallel processing and solving complex problems faster than classical computers."
+    },
+    {
+        "instruction": "Write a Python function to calculate factorial.",
+        "input": "",
+        "output": "def factorial(n):\n    if n == 0 or n == 1:\n        return 1\n    else:\n        return n * factorial(n - 1)"
+    },
+    {
+        "instruction": "What is the capital of Japan?",
+        "input": "",
+        "output": "The capital of Japan is Tokyo."
+    },
+    {
+        "instruction": "Describe the process of photosynthesis.",
+        "input": "",
+        "output": "Photosynthesis is the process by which plants convert sunlight, carbon dioxide, and water into glucose and oxygen using chlorophyll in their leaves."
+    },
+    {
+        "instruction": "How to make a cup of coffee?",
+        "input": "I have instant coffee powder, hot water, and a cup.",
+        "output": "Add 1-2 teaspoons of instant coffee powder to the cup, pour hot water over it, and stir until dissolved. Add sugar or milk if desired."
+    },
+    {
+        "instruction": "Explain the difference between HTTP and HTTPS.",
+        "input": "",
+        "output": "HTTP is unencrypted, while HTTPS uses SSL/TLS encryption to secure data transmission between client and server."
+    },
+    {
+        "instruction": "Write a short poem about technology.",
+        "input": "",
+        "output": "Digital waves flow through silicon veins,\nConnecting hearts across the vast domains,\nAlgorithms dance with electric light,\nAs humans and machines merge day and night."
+    },
+    {
+        "instruction": "Calculate the compound interest for principal amount 1000, rate 5%, and time 3 years.",
+        "input": "",
+        "output": "Compound Interest = Principal * (1 + Rate/100)^Time - Principal\nCI = 1000 * (1 + 0.05)^3 - 1000\nCI = 1000 * 1.157625 - 1000\nCI = 157.63"
+    }
+]
