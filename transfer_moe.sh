@@ -16,8 +16,8 @@ if [ -n "$PROMPT_FILE" ] && [ "$PROMPT_FILE" != "" ]; then
     TOTAL_SAMPLES=$(echo "$TRAINSAMPLE * 1.3" | bc | cut -d. -f1)
 
 
-    # Generate dataset using the teacher model
-    python generate_dataset.py --model_name $TEACHER_MODEL --prompt_file $PROMPT_FILE --num_samples $TOTAL_SAMPLES --output_file train_dataset.json
+    # Generate dataset using the teacher model with vLLM for faster multi-GPU generation
+    python generate_dataset_vllm.py --model_name $TEACHER_MODEL --prompt_file $PROMPT_FILE --num_samples $TOTAL_SAMPLES --output_file train_dataset.json
 
     # Use the generated dataset
     DATASET_FILE="train_dataset.json"
