@@ -15,12 +15,6 @@ if [ -n "$PROMPT_FILE" ] && [ "$PROMPT_FILE" != "" ]; then
     # Calculate number of samples to generate (train samples + 30% for eval/test)
     TOTAL_SAMPLES=$(echo "$TRAINSAMPLE * 1.3" | bc | cut -d. -f1)
 
-    # For faster testing, limit the number of samples generated
-    # In production, remove this limitation
-    if [ $TOTAL_SAMPLES -gt 50 ]; then
-        TOTAL_SAMPLES=50
-        echo "Limiting dataset generation to 50 samples for faster testing (would normally generate $TOTAL_SAMPLES)"
-    fi
 
     # Generate dataset using the teacher model
     python generate_dataset.py --model_name $TEACHER_MODEL --prompt_file $PROMPT_FILE --num_samples $TOTAL_SAMPLES --output_file train_dataset.json
