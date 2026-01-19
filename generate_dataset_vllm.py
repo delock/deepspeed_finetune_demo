@@ -72,11 +72,60 @@ def generate_training_data_vllm(teacher_model_name, prompt_file, num_samples, ou
         for i, output in enumerate(outputs):
             generated_text = output.outputs[0].text
 
-            # Create a sample with instruction, input (empty), and output
+            # Initialize default values
+            instruction_part = f"Python programming question #{i+1}"
+            input_part = ""
+            output_part = generated_text
+
+            # Try to parse the generated text to extract the actual problem, input, and solution
+            if "Problem:" in generated_text and "Input:" in generated_text and "Output:" in generated_text and "'''" in generated_text:
+                try:
+                    # Split the text to extract different parts
+                    # Format: "Problem: ... \nInput: ... \nOutput:\n'''\ncode\n'''"
+                    text_parts = generated_text.split("Output:", 1)
+                    if len(text_parts) > 1:
+                        # Part before "Output:" contains Problem and Input
+                        problem_input_part = text_parts[0]
+                        # Part after "Output:" contains the code between triple quotes
+                        output_section = text_parts[1]
+
+                        # Extract problem and input from the first part
+                        if "Input:" in problem_input_part:
+                            prob_input_split = problem_input_part.split("Input:", 1)
+                            instruction_part = "Problem:" + prob_input_split[0].split("Problem:", 1)[-1].strip()
+                            input_part = prob_input_split[1].strip()
+                        else:
+                            # If no Input section, just extract Problem
+                            if "Problem:" in problem_input_part:
+                                instruction_part = "Problem:" + problem_input_part.split("Problem:", 1)[-1].strip()
+
+                        # Extract code solution between triple quotes
+                        if "'''" in output_section:
+                            # Find the first and second occurrence of '''
+                            first_quote = output_section.find("'''")
+                            second_quote = output_section.find("'''", first_quote + 3)
+                            if second_quote != -1:
+                                output_part = output_section[first_quote + 3:second_quote].strip()
+                            else:
+                                # If only one closing ''', take from opening to end
+                                output_part = output_section[first_quote + 3:].strip()
+                        else:
+                            # If no triple quotes, use the entire output section
+                            output_part = output_section.strip()
+                except:
+                    # If parsing fails, use the original approach
+                    instruction_part = f"Python programming question #{i+1}"
+                    output_part = generated_text
+            else:
+                # If the format isn't as expected, use the full generated text as output
+                instruction_part = f"Python programming question #{i+1}"
+                output_part = generated_text
+
+            # Create a sample with instruction, input, and output
             sample = {
-                "instruction": f"Python programming question #{i+1}",
-                "input": "",  # Could be populated with specific code snippets or scenarios
-                "output": generated_text[:500] if len(generated_text) > 500 else generated_text  # Limit length
+                "instruction": instruction_part,
+                "input": input_part,
+                "output": output_part[:1000] if len(output_part) > 1000 else output_part  # Limit length
             }
 
             generated_data.append(sample)
@@ -97,10 +146,60 @@ def generate_training_data_vllm(teacher_model_name, prompt_file, num_samples, ou
 
             for i, output in enumerate(additional_outputs):
                 generated_text = output.outputs[0].text
+
+                # Initialize default values
+                instruction_part = f"Python programming question #{len(generated_data) + 1}"
+                input_part = ""
+                output_part = generated_text
+
+                # Try to parse the generated text to extract the actual problem, input, and solution
+                if "Problem:" in generated_text and "Input:" in generated_text and "Output:" in generated_text and "'''" in generated_text:
+                    try:
+                        # Split the text to extract different parts
+                        # Format: "Problem: ... \nInput: ... \nOutput:\n'''\ncode\n'''"
+                        text_parts = generated_text.split("Output:", 1)
+                        if len(text_parts) > 1:
+                            # Part before "Output:" contains Problem and Input
+                            problem_input_part = text_parts[0]
+                            # Part after "Output:" contains the code between triple quotes
+                            output_section = text_parts[1]
+
+                            # Extract problem and input from the first part
+                            if "Input:" in problem_input_part:
+                                prob_input_split = problem_input_part.split("Input:", 1)
+                                instruction_part = "Problem:" + prob_input_split[0].split("Problem:", 1)[-1].strip()
+                                input_part = prob_input_split[1].strip()
+                            else:
+                                # If no Input section, just extract Problem
+                                if "Problem:" in problem_input_part:
+                                    instruction_part = "Problem:" + problem_input_part.split("Problem:", 1)[-1].strip()
+
+                            # Extract code solution between triple quotes
+                            if "'''" in output_section:
+                                # Find the first and second occurrence of '''
+                                first_quote = output_section.find("'''")
+                                second_quote = output_section.find("'''", first_quote + 3)
+                                if second_quote != -1:
+                                    output_part = output_section[first_quote + 3:second_quote].strip()
+                                else:
+                                    # If only one closing ''', take from opening to end
+                                    output_part = output_section[first_quote + 3:].strip()
+                            else:
+                                # If no triple quotes, use the entire output section
+                                output_part = output_section.strip()
+                    except:
+                        # If parsing fails, use the original approach
+                        instruction_part = f"Python programming question #{len(generated_data) + 1}"
+                        output_part = generated_text
+                else:
+                    # If the format isn't as expected, use the full generated text as output
+                    instruction_part = f"Python programming question #{len(generated_data) + 1}"
+                    output_part = generated_text
+
                 sample = {
-                    "instruction": f"Python programming question #{len(generated_data) + 1}",
-                    "input": "",
-                    "output": generated_text[:500] if len(generated_text) > 500 else generated_text
+                    "instruction": instruction_part,
+                    "input": input_part,
+                    "output": output_part[:1000] if len(output_part) > 1000 else output_part  # Limit length
                 }
                 generated_data.append(sample)
 

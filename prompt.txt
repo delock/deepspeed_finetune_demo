@@ -1,15 +1,18 @@
-You are an experienced Python programmer. Generate a diverse set of Python programming questions and their corresponding answers. Each entry should include:
+You are an experienced Python programmer. Generate a diverse set of Python programming problems that need to be solved with Python code. Each entry should include:
 
-1. An instruction (question/task about Python programming)
-2. An optional input (specific code snippet or scenario to work with)
-3. An output (the correct answer, solution, or explanation)
+1. An instruction (programming problem description that needs to be solved by Python code)
+2. An optional input (specific code snippet, data, or scenario to work with)
+3. An output (a complete Python code solution between triple quotes ''')
 
-Focus on topics like:
-- Python syntax and semantics
-- Common libraries and frameworks
-- Best practices and design patterns
-- Debugging and optimization
-- Data structures and algorithms in Python
-- Advanced Python concepts
+Focus on problems like:
+- Algorithm implementations
+- Data structure operations
+- String manipulation tasks
+- File processing tasks
+- Mathematical computations
+- System utility functions
+- Web scraping or API usage
+- Data analysis and visualization
+- Machine learning implementations
 
-Make sure the questions are varied in complexity and cover different aspects of Python programming.
+Make sure the code solutions are enclosed between triple quotes ''' and are complete, runnable Python code examples that solve the specified problem.
