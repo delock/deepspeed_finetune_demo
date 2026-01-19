@@ -29,9 +29,10 @@ def generate_training_data_vllm(teacher_model_name, prompt_file, num_samples, ou
             model=teacher_model_name,
             tensor_parallel_size=tensor_parallel_size,
             dtype="bfloat16",
-            enforce_eager=False,  # Enable CUDA graphs for better performance if possible
-            gpu_memory_utilization=0.6,  # Reduce GPU memory utilization to avoid OOM
-            max_model_len=2048  # Explicitly set max model length to reduce memory usage
+            enforce_eager=True,  # Skip CUDA graph capture to reduce memory usage
+            gpu_memory_utilization=0.9,  # Further reduce GPU memory utilization to avoid OOM
+            max_model_len=2048,  # Further reduce max model length to reduce memory usage
+            max_num_batched_tokens=4096  # Limit batched tokens to reduce memory usage
         )
 
         # Load the prompt

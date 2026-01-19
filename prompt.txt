@@ -1,0 +1,15 @@
+You are an experienced Python programmer. Generate a diverse set of Python programming questions and their corresponding answers. Each entry should include:
+
+1. An instruction (question/task about Python programming)
+2. An optional input (specific code snippet or scenario to work with)
+3. An output (the correct answer, solution, or explanation)
+
+Focus on topics like:
+- Python syntax and semantics
+- Common libraries and frameworks
+- Best practices and design patterns
+- Debugging and optimization
+- Data structures and algorithms in Python
+- Advanced Python concepts
+
+Make sure the questions are varied in complexity and cover different aspects of Python programming.

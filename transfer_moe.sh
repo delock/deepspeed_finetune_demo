@@ -34,6 +34,8 @@ else
     DATASET_FILE=""
 fi
 
+exit 0
+
 if [ "$ANALYZE" = "--analyze_gates" ]; then
     if [ -n "$DATASET_FILE" ] && [ "$DATASET_FILE" != "" ]; then
         deepspeed --bind_cores_to_rank transfer_moe.py --model_name $STUDENT_MODEL --output_dir output --lr 2e-5 --batch_size $BATCH --deepspeed_config $CONFIG --num_train_samples $TRAINSAMPLE --train_dataset_size $TRAIN_DATASET_SIZE --dataset $DATASET_FILE --eval_steps 100 --no_mask_instruction_input
