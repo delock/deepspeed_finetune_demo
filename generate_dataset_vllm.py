@@ -121,6 +121,49 @@ def generate_training_data_vllm(teacher_model_name, prompt_file, num_samples, ou
                 instruction_part = f"Python programming question #{i+1}"
                 output_part = generated_text
 
+            # Check if output is in the format with "Instruction:", "Input:", "Output:" sections
+            if "1. Instruction:" in output_part and "2. Input:" in output_part and "3. Output:" in output_part:
+                # Parse the output to extract the actual instruction, input, and response
+                try:
+                    # Split by numbered sections
+                    sections = output_part.split("2. Input:", 1)
+                    if len(sections) > 1:
+                        instruction_part_new = sections[0].replace("1. Instruction:", "").strip()
+                        remaining = sections[1].split("3. Output:", 1)
+                        if len(remaining) > 1:
+                            input_part_new = remaining[0].strip()
+                            output_part_new = remaining[1].strip()
+
+                            # Clean up the output part to extract just the code
+                            if "```python" in output_part_new:
+                                code_sections = output_part_new.split("```python", 1)
+                                if len(code_sections) > 1:
+                                    code_content = code_sections[1].split("```", 1)[0].strip()
+                                    output_part_new = code_content
+                                else:
+                                    # If no closing ``` found, take content after opening tag
+                                    output_part_new = code_sections[1].strip() if len(code_sections) > 1 else output_part_new
+
+                            instruction_part = instruction_part_new
+                            input_part = input_part_new
+                            output_part = output_part_new
+                        else:
+                            # If no Output section found, use the remaining as output
+                            input_part_new = remaining[0].strip()
+                            instruction_part = instruction_part
+                            input_part = input_part_new
+                            output_part = output_part
+                    else:
+                        # If no Input section found, just extract Instruction
+                        inst_sections = output_part.split("1. Instruction:", 1)
+                        if len(inst_sections) > 1:
+                            instruction_part = inst_sections[1].split("2. Input:")[0].strip()
+                        else:
+                            instruction_part = instruction_part
+                except:
+                    # If parsing fails, keep the original values
+                    pass
+
             # Post-process: Check if output contains Python code
             # Simple heuristic: check for common Python keywords and syntax
             has_python_code = (
@@ -177,7 +220,49 @@ def generate_training_data_vllm(teacher_model_name, prompt_file, num_samples, ou
                 output_part = generated_text
 
                 # Try to parse the generated text to extract the actual problem, input, and solution
-                if "Problem:" in generated_text and "Input:" in generated_text and "Output:" in generated_text and "'''" in generated_text:
+                # First check for the newer format with numbered sections
+                if "1. Instruction:" in generated_text and "2. Input:" in generated_text and "3. Output:" in generated_text:
+                    try:
+                        # Split by numbered sections
+                        # Format: "1. Instruction: ... \n2. Input: ... \n3. Output: \n```python\ncode\n```"
+                        sections = generated_text.split("2. Input:", 1)
+                        if len(sections) > 1:
+                            instruction_part = sections[0].replace("1. Instruction:", "").strip()
+                            remaining = sections[1].split("3. Output:", 1)
+                            if len(remaining) > 1:
+                                input_part = remaining[0].strip()
+                                output_part = remaining[1].strip()
+
+                                # Clean up the output part to extract just the code
+                                if "```python" in output_part:
+                                    code_sections = output_part.split("```python", 1)
+                                    if len(code_sections) > 1:
+                                        code_content = code_sections[1].split("```", 1)[0].strip()
+                                        output_part = code_content
+                                    else:
+                                        # If no closing ``` found, take content after opening tag
+                                        output_part = code_sections[1].strip() if len(code_sections) > 1 else output_part
+                                elif "'''" in output_part:
+                                    # Alternative format with triple quotes
+                                    code_sections = output_part.split("'''", 1)
+                                    if len(code_sections) > 1 and "'''" in code_sections[1]:
+                                        code_content = code_sections[1].split("'''", 1)[0].strip()
+                                        output_part = code_content
+                                    else:
+                                        # If no closing ''', take content after opening
+                                        output_part = code_sections[1].strip() if len(code_sections) > 1 else output_part
+                        else:
+                            # If no Input section found, just extract Instruction
+                            inst_sections = generated_text.split("1. Instruction:", 1)
+                            if len(inst_sections) > 1:
+                                instruction_part = inst_sections[1].split("2. Input:")[0].strip()
+                                output_part = generated_text
+                    except:
+                        # If parsing fails, use the original approach
+                        instruction_part = f"Python programming question #{len(generated_data) + 1}"
+                        output_part = generated_text
+                elif "Problem:" in generated_text and "Input:" in generated_text and "Output:" in generated_text and "'''" in generated_text:
+                    # Fall back to the older format with "Problem:", "Input:", "Output:" and triple quotes
                     try:
                         # Split the text to extract different parts
                         # Format: "Problem: ... \nInput: ... \nOutput:\n'''\ncode\n'''"
