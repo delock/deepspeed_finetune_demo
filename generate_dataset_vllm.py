@@ -22,16 +22,16 @@ def generate_training_data_vllm(teacher_model_name, prompt_file, num_samples, ou
         print(f"Using vLLM for dataset generation with model: {teacher_model_name}")
 
         # Create the LLM instance with multi-GPU support
-        # Use a smaller tensor_parallel_size to reduce memory usage if needed
         available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-        tensor_parallel_size = min(available_gpus, 2)  # Limit to 2 GPUs to reduce memory pressure
+        tensor_parallel_size = available_gpus  # Use all available GPUs for maximum parallelization
 
         llm = LLM(
             model=teacher_model_name,
             tensor_parallel_size=tensor_parallel_size,
             dtype="bfloat16",
-            enforce_eager=True,  # Skip CUDA graph capture to reduce memory usage
-            gpu_memory_utilization=0.8  # Use only 80% of GPU memory to avoid OOM
+            enforce_eager=False,  # Enable CUDA graphs for better performance if possible
+            gpu_memory_utilization=0.6,  # Reduce GPU memory utilization to avoid OOM
+            max_model_len=2048  # Explicitly set max model length to reduce memory usage
         )
 
         # Load the prompt

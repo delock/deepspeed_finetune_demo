@@ -17,10 +17,19 @@ if [ -n "$PROMPT_FILE" ] && [ "$PROMPT_FILE" != "" ]; then
 
 
     # Generate dataset using the teacher model with vLLM for faster multi-GPU generation
-    python generate_dataset_vllm.py --model_name $TEACHER_MODEL --prompt_file $PROMPT_FILE --num_samples $TOTAL_SAMPLES --output_file train_dataset.json
-
-    # Use the generated dataset
-    DATASET_FILE="train_dataset.json"
+    if python generate_dataset_vllm.py --model_name $TEACHER_MODEL --prompt_file $PROMPT_FILE --num_samples $TOTAL_SAMPLES --output_file train_dataset.json; then
+        echo "Dataset generation completed successfully"
+        DATASET_FILE="train_dataset.json"
+    else
+        echo "Dataset generation failed, checking for existing dataset..."
+        if [ -f "train_dataset.json" ]; then
+            echo "Using existing train_dataset.json"
+            DATASET_FILE="train_dataset.json"
+        else
+            echo "No dataset available, exiting..."
+            exit 1
+        fi
+    fi
 else
     DATASET_FILE=""
 fi
