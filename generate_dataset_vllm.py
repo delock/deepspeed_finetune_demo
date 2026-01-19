@@ -121,14 +121,38 @@ def generate_training_data_vllm(teacher_model_name, prompt_file, num_samples, ou
                 instruction_part = f"Python programming question #{i+1}"
                 output_part = generated_text
 
-            # Create a sample with instruction, input, and output
-            sample = {
-                "instruction": instruction_part,
-                "input": input_part,
-                "output": output_part[:1000] if len(output_part) > 1000 else output_part  # Limit length
-            }
+            # Post-process: Check if output contains Python code
+            # Simple heuristic: check for common Python keywords and syntax
+            has_python_code = (
+                'def ' in output_part or
+                'import ' in output_part or
+                'class ' in output_part or
+                'for ' in output_part or
+                'if ' in output_part or
+                '=' in output_part or
+                'print(' in output_part or
+                'return ' in output_part or
+                'lambda ' in output_part or
+                'while ' in output_part or
+                'try:' in output_part or
+                'except:' in output_part or
+                'self.' in output_part or
+                'yield ' in output_part
+            )
 
-            generated_data.append(sample)
+            # Only add to dataset if output contains Python code
+            if has_python_code:
+                sample = {
+                    "instruction": instruction_part,
+                    "input": input_part,
+                    "output": output_part[:1000] if len(output_part) > 1000 else output_part  # Limit length
+                }
+
+                generated_data.append(sample)
+                if len(generated_data) % 5 == 0:  # Print progress every 5 valid samples
+                    print(f"Collected {len(generated_data)} valid samples with Python code")
+            else:
+                print(f"Sample #{i+1} does not contain Python code, skipping...")
 
         # If we need more samples than processed in the first batch, continue generating
         remaining_samples = num_samples - len(generated_data)
@@ -196,12 +220,37 @@ def generate_training_data_vllm(teacher_model_name, prompt_file, num_samples, ou
                     instruction_part = f"Python programming question #{len(generated_data) + 1}"
                     output_part = generated_text
 
-                sample = {
-                    "instruction": instruction_part,
-                    "input": input_part,
-                    "output": output_part[:1000] if len(output_part) > 1000 else output_part  # Limit length
-                }
-                generated_data.append(sample)
+                # Post-process: Check if output contains Python code
+                # Simple heuristic: check for common Python keywords and syntax
+                has_python_code = (
+                    'def ' in output_part or
+                    'import ' in output_part or
+                    'class ' in output_part or
+                    'for ' in output_part or
+                    'if ' in output_part or
+                    '=' in output_part or
+                    'print(' in output_part or
+                    'return ' in output_part or
+                    'lambda ' in output_part or
+                    'while ' in output_part or
+                    'try:' in output_part or
+                    'except:' in output_part or
+                    'self.' in output_part or
+                    'yield ' in output_part
+                )
+
+                # Only add to dataset if output contains Python code
+                if has_python_code:
+                    sample = {
+                        "instruction": instruction_part,
+                        "input": input_part,
+                        "output": output_part[:1000] if len(output_part) > 1000 else output_part  # Limit length
+                    }
+                    generated_data.append(sample)
+                    if len(generated_data) % 5 == 0:  # Print progress every 5 valid samples
+                        print(f"Collected {len(generated_data)} valid samples with Python code")
+                else:
+                    print(f"Additional sample #{len(generated_data) + 1} does not contain Python code, skipping...")
 
             remaining_samples -= batch_size
 
