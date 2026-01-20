@@ -34,7 +34,6 @@ else
     DATASET_FILE=""
 fi
 
-exit 0
 
 if [ "$ANALYZE" = "--analyze_gates" ]; then
     if [ -n "$DATASET_FILE" ] && [ "$DATASET_FILE" != "" ]; then

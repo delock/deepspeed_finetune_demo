@@ -324,18 +324,40 @@ def generate_training_data_vllm(teacher_model_name, prompt_file, num_samples, ou
                     'yield ' in output_part
                 )
 
-                # Only add to dataset if output contains Python code
-                if has_python_code:
-                    sample = {
-                        "instruction": instruction_part,
-                        "input": input_part,
-                        "output": output_part[:1000] if len(output_part) > 1000 else output_part  # Limit length
-                    }
-                    generated_data.append(sample)
-                    if len(generated_data) % 5 == 0:  # Print progress every 5 valid samples
-                        print(f"Collected {len(generated_data)} valid samples with Python code")
+                # Apply data cleaning rules to fix common issues and validate sample
+                cleaned_sample = clean_generated_sample(instruction_part, input_part, output_part)
+                if cleaned_sample is not None:
+                    # Only add to dataset if output contains Python code after cleaning
+                    has_python_code_after_cleaning = (
+                        'def ' in cleaned_sample["output"] or
+                        'import ' in cleaned_sample["output"] or
+                        'class ' in cleaned_sample["output"] or
+                        'for ' in cleaned_sample["output"] or
+                        'if ' in cleaned_sample["output"] or
+                        '=' in cleaned_sample["output"] or
+                        'print(' in cleaned_sample["output"] or
+                        'return ' in cleaned_sample["output"] or
+                        'lambda ' in cleaned_sample["output"] or
+                        'while ' in cleaned_sample["output"] or
+                        'try:' in cleaned_sample["output"] or
+                        'except:' in cleaned_sample["output"] or
+                        'self.' in cleaned_sample["output"] or
+                        'yield ' in cleaned_sample["output"]
+                    )
+
+                    if has_python_code_after_cleaning:
+                        sample = {
+                            "instruction": cleaned_sample["instruction"],
+                            "input": cleaned_sample["input"],
+                            "output": cleaned_sample["output"][:1000] if len(cleaned_sample["output"]) > 1000 else cleaned_sample["output"]  # Limit length
+                        }
+                        generated_data.append(sample)
+                        if len(generated_data) % 5 == 0:  # Print progress every 5 valid samples
+                            print(f"Collected {len(generated_data)} valid samples with Python code")
+                    else:
+                        print(f"Additional sample #{len(generated_data) + 1} does not contain Python code after cleaning, skipping...")
                 else:
-                    print(f"Additional sample #{len(generated_data) + 1} does not contain Python code, skipping...")
+                    print(f"Additional sample #{len(generated_data) + 1} was dropped after cleaning due to format issues")
 
             remaining_samples -= batch_size
 
@@ -484,3 +506,70 @@ def main():
 
 if __name__ == "__main__":
     main()
+def clean_generated_sample(instruction, input_text, output_text):
+    """
+    Clean generated samples to fix common issues.
+    
+    Args:
+        instruction: The instruction part
+        input_text: The input part
+        output_text: The output part
+    
+    Returns:
+        Cleaned sample dictionary or None if sample should be dropped
+    """
+    # Rule 1: Drop samples with empty instruction
+    if not instruction or instruction.strip() == "":
+        print("Dropping sample with empty instruction")
+        return None
+    
+    # Rule 2: Fix incomplete triple quotes in output
+    # Count occurrences of ''' to ensure they are properly paired
+    if output_text.count("'''") % 2 == 1:  # Odd number of triple quotes
+        # Find the last occurrence and remove it to avoid incomplete block
+        last_quote_pos = output_text.rfind("'''")
+        if last_quote_pos != -1:
+            output_text = output_text[:last_quote_pos].rstrip()
+    
+    # Rule 3: Fix incomplete ```python blocks
+    if output_text.count("```python") != output_text.count("```"):
+        # If there's an opening ```python without a closing ```, remove the opening
+        if "```python" in output_text and output_text.count("```") < output_text.count("```python"):
+            output_text = output_text.replace("```python", "")
+    
+    # Rule 4: Remove trailing incomplete code blocks
+    if output_text.endswith("'''") or output_text.endswith("```"):
+        # If output ends with incomplete quote, remove it
+        if output_text.endswith("'''"):
+            output_text = output_text[:-3].rstrip()
+        elif output_text.endswith("```"):
+            output_text = output_text[:-3].rstrip()
+    
+    # Rule 5: Check if output still contains Python code after cleaning
+    has_python_code = (
+        'def ' in output_text or 
+        'import ' in output_text or 
+        'class ' in output_text or 
+        'for ' in output_text or 
+        'if ' in output_text or 
+        '=' in output_text or 
+        'print(' in output_text or
+        'return ' in output_text or
+        'lambda ' in output_text or
+        'while ' in output_text or
+        'try:' in output_text or
+        'except:' in output_text or
+        'self.' in output_text or
+        'yield ' in output_text
+    )
+    
+    # Only return sample if it still contains Python code after cleaning
+    if has_python_code:
+        return {
+            "instruction": instruction.strip(),
+            "input": input_text.strip(),
+            "output": output_text.strip()
+        }
+    else:
+        print("Dropping sample after cleaning - no longer contains Python code")
+        return None
