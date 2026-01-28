@@ -37,7 +37,10 @@ def preprocess_alpaca(example, tokenizer, max_length=512):
         prompt += f"### Input:\n{example['input']}\n\n"
     prompt += f"### Response:\n{example['output']}"
     tokenized = tokenizer(prompt, truncation=True, max_length=max_length, padding="max_length")
-    tokenized["labels"] = tokenized["input_ids"].copy()
+    # Mask padding tokens in labels by setting them to -100 (ignored by CrossEntropyLoss)
+    labels = tokenized["input_ids"].copy()
+    labels = [-100 if token == tokenizer.pad_token_id else token for token in labels]
+    tokenized["labels"] = labels
     return tokenized
 
 def evaluate(model_engine, eval_dataloader):
@@ -222,7 +225,7 @@ def main(args):
                 if dist.get_rank() == 0:
                     if eval_loss is not None:
                         if args.wandb_name != None:
-                            wandb.log({"global_samples": global_samples, "loss": eval_loss})
+                            wandb.log({"global_samples": global_samples, "eval-loss": eval_loss})
                         print(f"[Eval @ step {global_step}] Average eval loss: {eval_loss:.4f}")
             global_step += 1
             if prof != None:
