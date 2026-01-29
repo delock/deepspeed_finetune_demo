@@ -31,15 +31,33 @@ def set_seed(seed):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-def preprocess_alpaca(example, tokenizer, max_length=512):
-    prompt = f"### Instruction:\n{example['instruction']}\n\n"
+def preprocess_alpaca(example, tokenizer, max_length=2048):
+    # Build instruction part (will be masked from loss)
+    instruction = f"### Instruction:\n{example['instruction']}\n\n"
     if example.get("input", ""):
-        prompt += f"### Input:\n{example['input']}\n\n"
-    prompt += f"### Response:\n{example['output']}"
-    tokenized = tokenizer(prompt, truncation=True, max_length=max_length, padding="max_length")
-    # Mask padding tokens in labels by setting them to -100 (ignored by CrossEntropyLoss)
+        instruction += f"### Input:\n{example['input']}\n\n"
+    instruction += "### Response:\n"
+    response = example['output']
+
+    full_prompt = instruction + response
+    tokenized = tokenizer(full_prompt, truncation=True, max_length=max_length, padding="max_length")
+
+    # Find instruction length to mask it from loss
+    # Use full_prompt tokenization to get accurate instruction boundary after truncation
+    instruction_ids = tokenizer(instruction, add_special_tokens=False)["input_ids"]
+    instruction_len = len(instruction_ids)
+
+    # Ensure at least one token is unmasked to avoid NaN loss
+    # If instruction is longer than max_length, only mask padding tokens
+    seq_len = sum(1 for t in tokenized["input_ids"] if t != tokenizer.pad_token_id)
+    if instruction_len >= seq_len:
+        instruction_len = max(0, seq_len - 1)  # Keep at least the last non-pad token
+
+    # Mask instruction and padding tokens in labels (set to -100, ignored by CrossEntropyLoss)
     labels = tokenized["input_ids"].copy()
-    labels = [-100 if token == tokenizer.pad_token_id else token for token in labels]
+    for i in range(len(labels)):
+        if i < instruction_len or labels[i] == tokenizer.pad_token_id:
+            labels[i] = -100
     tokenized["labels"] = labels
     return tokenized
 
