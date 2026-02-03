@@ -4,14 +4,8 @@ import deepspeed
 import argparse
 from datasets import load_dataset
 from torch.utils.data import DataLoader
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    default_data_collator
-)
-from transformers.integrations.deepspeed import (
-    HfDeepSpeedConfig
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
+from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import json
 import random
 import numpy as np
@@ -19,6 +13,7 @@ from deepspeed import comm as dist
 import logging
 
 import os
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import wandb
@@ -31,16 +26,19 @@ def set_seed(seed):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+
 def preprocess_alpaca(example, tokenizer, max_length=2048):
     # Build instruction part (will be masked from loss)
     instruction = f"### Instruction:\n{example['instruction']}\n\n"
     if example.get("input", ""):
         instruction += f"### Input:\n{example['input']}\n\n"
     instruction += "### Response:\n"
-    response = example['output']
+    response = example["output"]
 
     full_prompt = instruction + response
-    tokenized = tokenizer(full_prompt, truncation=True, max_length=max_length, padding="max_length")
+    tokenized = tokenizer(
+        full_prompt, truncation=True, max_length=max_length, padding="max_length"
+    )
 
     # Find instruction length to mask it from loss
     # Use full_prompt tokenization to get accurate instruction boundary after truncation
@@ -61,6 +59,7 @@ def preprocess_alpaca(example, tokenizer, max_length=2048):
     tokenized["labels"] = labels
     return tokenized
 
+
 def evaluate(model_engine, eval_dataloader):
     import torch
     from tqdm import tqdm
@@ -76,7 +75,9 @@ def evaluate(model_engine, eval_dataloader):
     # Iterate only batches where (batch_idx % world_size) == rank
     with torch.no_grad():
         if rank == 0:
-            enum = enumerate(tqdm(eval_dataloader, desc=f"Evaluating [rank {rank}]", leave=False))
+            enum = enumerate(
+                tqdm(eval_dataloader, desc=f"Evaluating [rank {rank}]", leave=False)
+            )
         else:
             enum = enumerate(eval_dataloader)
         for batch_idx, batch in enum:
@@ -103,12 +104,14 @@ def evaluate(model_engine, eval_dataloader):
     avg_loss = (local_sum / local_count).item()
     return avg_loss
 
+
 def print_r(rank, arg):
     if rank == dist.get_rank():
         print(arg)
 
+
 def main(args):
-    logging.basicConfig(level=logging.INFO, filename='pytorch_log.txt')
+    logging.basicConfig(level=logging.INFO, filename="pytorch_log.txt")
     set_seed(args.seed)
 
     # override batch size in ds_config
@@ -117,16 +120,18 @@ def main(args):
     ds_config["train_batch_size"] = args.batch_size
     delattr(args, "deepspeed_config")
     # make sure models are properly loaded in zero3
-    dschf=HfDeepSpeedConfig(ds_config)
+    dschf = HfDeepSpeedConfig(ds_config)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name, torch_dtype=torch.bfloat16
+    )
     model.gradient_checkpointing_enable()
 
-    '''
+    """
     # the code below allows you to train only part of the parameters
     # we haven't parameterize this part yet, so uncomment down below and modify the code manually
 
@@ -142,7 +147,7 @@ def main(args):
     # Enable input gradient requirements to ensure gradient flow
     # This is needed when using gradient checkpointing with partially frozen models
     model.enable_input_require_grads()
-    '''
+    """
 
     # Load Alpaca 52K dataset and split into train/eval
     dataset = load_dataset(args.dataset_name)
@@ -150,21 +155,25 @@ def main(args):
     train_dataset = split_dataset["train"]
     eval_dataset = split_dataset["test"]
 
-    tokenized_train_dataset = train_dataset.map(lambda x: preprocess_alpaca(x, tokenizer), batched=False)
-    tokenized_eval_dataset = eval_dataset.map(lambda x: preprocess_alpaca(x, tokenizer), batched=False)
+    tokenized_train_dataset = train_dataset.map(
+        lambda x: preprocess_alpaca(x, tokenizer), batched=False
+    )
+    tokenized_eval_dataset = eval_dataset.map(
+        lambda x: preprocess_alpaca(x, tokenizer), batched=False
+    )
 
     # Create DataLoader - let DeepSpeed handle the actual batching
     train_dataloader = DataLoader(
         tokenized_train_dataset,
         batch_size=1,  # This will be overridden by DeepSpeed config
         collate_fn=default_data_collator,
-        shuffle=True
+        shuffle=True,
     )
     eval_dataloader = DataLoader(
         tokenized_eval_dataset,
         batch_size=1,  # small eval batch for stability
         collate_fn=default_data_collator,
-        shuffle=False
+        shuffle=False,
     )
 
     # DeepSpeed will automatically parse the config file passed via --deepspeed argument
@@ -174,7 +183,7 @@ def main(args):
         model_parameters=model.parameters(),
         training_data=tokenized_train_dataset,
         collate_fn=default_data_collator,
-        config=ds_config
+        config=ds_config,
     )
 
     model_engine.train()
@@ -189,12 +198,15 @@ def main(args):
     if args.profile_start >= 0:
         save_checkpoint_p = False
 
-    if args.profile_start >=0:
+    if args.profile_start >= 0:
         prof = torch.profiler.profile(
-                  activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-                  record_shapes=True,
-                  profile_memory=True,
-              )
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            record_shapes=True,
+            profile_memory=True,
+        )
     else:
         prof = None
 
@@ -214,7 +226,11 @@ def main(args):
                 # print profile
                 if dist.get_rank() == 0:
                     prof.export_chrome_trace("trace.json")
-                    print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
+                    print(
+                        prof.key_averages().table(
+                            sort_by="self_cuda_time_total", row_limit=10
+                        )
+                    )
             step_start_time = time.time()
             batch = {k: v.to(model_engine.device) for k, v in batch.items()}
             outputs = model_engine(**batch)
@@ -234,17 +250,36 @@ def main(args):
 
             if dist.get_rank() == 0:
                 wandb.log({"global_samples": global_samples, "train-loss": loss})
-            if global_step%10==0:  # Print every 10 steps
-                print_r(0, f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time*1000:.0f}ms")
+            if global_step % 10 == 0:  # Print every 10 steps
+                msg = f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time * 1000:.0f}ms"
+                print_r(0, msg)
+                if dist.get_rank() == 0:
+                    logging.info(msg)
 
             # Evaluation after every eval_steps
-            if args.eval_steps > 0 and global_step % args.eval_steps == 0 and save_checkpoint_p:
+            if (
+                args.eval_steps > 0
+                and global_step % args.eval_steps == 0
+                and save_checkpoint_p
+            ):
                 eval_loss = evaluate(model_engine, eval_dataloader)
                 if dist.get_rank() == 0:
                     if eval_loss is not None:
+                        eval_loss_val = float(eval_loss)
                         if args.wandb_name != None:
-                            wandb.log({"global_samples": global_samples, "eval-loss": eval_loss})
-                        print(f"[Eval @ step {global_step}] Average eval loss: {eval_loss:.4f}")
+                            wandb.log(
+                                {
+                                    "global_samples": global_samples,
+                                    "eval-loss": eval_loss_val,
+                                }
+                            )
+                        eval_msg = f"[Eval @ step {global_step}] Eval Loss: {eval_loss_val:.4f}"
+                        print(eval_msg, flush=True)
+                        logging.info(eval_msg)
+                    else:
+                        eval_msg = f"[Eval @ step {global_step}] Eval Loss unavailable (no eval batches processed)"
+                        print(eval_msg, flush=True)
+                        logging.info(eval_msg)
             global_step += 1
             if prof != None:
                 prof.step()
@@ -254,7 +289,7 @@ def main(args):
                 break
 
     if args.bench_start >= 0 and args.bench_steps > 0:
-        print_r (0, f"Average iteration time = {total_time/total_count}")
+        print_r(0, f"Average iteration time = {total_time / total_count}")
 
     if save_checkpoint_p:
         # Save model using DeepSpeed's save_checkpoint method
@@ -271,10 +306,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, required=True)
     parser.add_argument("--dataset_name", type=str, default="tatsu-lab/alpaca")
-    parser.add_argument('--local_rank',
-                    type=int,
-                    default=-1,
-                    help='local rank passed from distributed launcher')
+    parser.add_argument(
+        "--local_rank",
+        type=int,
+        default=-1,
+        help="local rank passed from distributed launcher",
+    )
     parser.add_argument("--lr", type=float, required=True)
     parser.add_argument("--batch_size", type=int, required=True)
     parser.add_argument("--profile_start", type=int, default=-1)
@@ -286,7 +323,12 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--bench_start", type=int, default=-1)
     parser.add_argument("--bench_steps", type=int, default=100)
-    parser.add_argument("--eval_steps", type=int, default=0, help="Run evaluation every N steps (0 disables)")
+    parser.add_argument(
+        "--eval_steps",
+        type=int,
+        default=0,
+        help="Run evaluation every N steps (0 disables)",
+    )
     parser.add_argument("--wandb_name", type=str, default=None)
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
