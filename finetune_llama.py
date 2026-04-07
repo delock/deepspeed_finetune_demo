@@ -312,7 +312,7 @@ if __name__ == "__main__":
         default=-1,
         help="local rank passed from distributed launcher",
     )
-    parser.add_argument("--lr", type=float, required=True)
+
     parser.add_argument("--batch_size", type=int, required=True)
     parser.add_argument("--profile_start", type=int, default=-1)
     parser.add_argument("--profile_steps", type=int, default=4)
