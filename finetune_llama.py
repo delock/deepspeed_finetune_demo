@@ -171,7 +171,7 @@ def main(args):
     )
     eval_dataloader = DataLoader(
         tokenized_eval_dataset,
-        batch_size=1,  # small eval batch for stability
+        batch_size=args.eval_batch_size,
         collate_fn=default_data_collator,
         shuffle=False,
     )
@@ -283,10 +283,14 @@ def main(args):
             global_step += 1
             if prof != None:
                 prof.step()
+            if args.max_steps > 0 and global_step >= args.max_steps:
+                break
 
         if args.bench_start >= 0 and args.bench_steps > 0:
             if global_step >= args.bench_start + args.bench_steps - 1:
                 break
+        if args.max_steps > 0 and global_step >= args.max_steps:
+            break
 
     if args.bench_start >= 0 and args.bench_steps > 0:
         print_r(0, f"Average iteration time = {total_time / total_count}")
@@ -330,6 +334,12 @@ if __name__ == "__main__":
         help="Run evaluation every N steps (0 disables)",
     )
     parser.add_argument("--wandb_name", type=str, default=None)
+    parser.add_argument(
+        "--max_steps", type=int, default=-1, help="Stop after N steps (-1 = full epoch)"
+    )
+    parser.add_argument(
+        "--eval_batch_size", type=int, default=1, help="Eval batch size per rank"
+    )
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
 
