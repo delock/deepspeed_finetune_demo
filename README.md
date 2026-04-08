@@ -63,6 +63,7 @@ For quick start, some config files are added, you may also modify the config to 
 | zf_config.json | ZeRO Offload with ZenFlow |
 | so_config.json | ZeRO Offload with SuperOffload |
 | z2_muon.json | ZeRO 2 with Muon optimizer |
+| z3_muon.json | ZeRO 3 with Muon optimizer |
 | tp_config.json | ZeRO 2 with AutoTP |
 
 ## Muon optimizer config
