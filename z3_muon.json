@@ -2,7 +2,8 @@
     "train_batch_size": 8,
     "bf16": { "enabled": true },
     "zero_optimization": {
-      "stage": 3
+      "stage": 3,
+      "reduce_scatter": false
     },
     "optimizer": {
       "type": "Muon",

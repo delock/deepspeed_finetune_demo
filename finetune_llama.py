@@ -248,7 +248,7 @@ def main(args):
                 if global_step >= args.bench_start + args.bench_steps - 1:
                     break
 
-            if dist.get_rank() == 0:
+            if dist.get_rank() == 0 and args.wandb_name is not None:
                 wandb.log({"global_samples": global_samples, "train-loss": loss})
             if global_step % 10 == 0:  # Print every 10 steps
                 msg = f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time * 1000:.0f}ms"
