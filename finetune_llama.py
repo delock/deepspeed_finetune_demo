@@ -122,13 +122,17 @@ def main(args):
     # make sure models are properly loaded in zero3
     dschf = HfDeepSpeedConfig(ds_config)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_name, torch_dtype=torch.bfloat16
+        args.model_name,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+        attn_implementation="flash_attention_2",
     )
+    model.config.use_cache = False
     model.gradient_checkpointing_enable()
 
     """
@@ -156,10 +160,12 @@ def main(args):
     eval_dataset = split_dataset["test"]
 
     tokenized_train_dataset = train_dataset.map(
-        lambda x: preprocess_alpaca(x, tokenizer), batched=False
+        lambda x: preprocess_alpaca(x, tokenizer, max_length=args.max_length),
+        batched=False,
     )
     tokenized_eval_dataset = eval_dataset.map(
-        lambda x: preprocess_alpaca(x, tokenizer), batched=False
+        lambda x: preprocess_alpaca(x, tokenizer, max_length=args.max_length),
+        batched=False,
     )
 
     # Create DataLoader - let DeepSpeed handle the actual batching
@@ -191,7 +197,7 @@ def main(args):
     total_time = 0
     total_count = 0
 
-    # skip unnecessary evaluation
+    # skip unnecessary evaluation and checkpoint saving
     save_checkpoint_p = True
     if args.bench_start >= 0 and args.bench_steps > 0:
         save_checkpoint_p = False
@@ -250,7 +256,7 @@ def main(args):
 
             if dist.get_rank() == 0 and args.wandb_name is not None:
                 wandb.log({"global_samples": global_samples, "train-loss": loss})
-            if global_step % 10 == 0:  # Print every 10 steps
+            if global_step % 1 == 0:  # Print every step
                 msg = f"Step {global_step}, Loss: {loss.item():.4f}, Time: {step_time * 1000:.0f}ms"
                 print_r(0, msg)
                 if dist.get_rank() == 0:
@@ -296,12 +302,24 @@ def main(args):
         print_r(0, f"Average iteration time = {total_time / total_count}")
 
     if save_checkpoint_p:
-        # Save model using DeepSpeed's save_checkpoint method
-        # on zero3, it is necessary for each rank to save the checkpoint
-        # for other stage, we just save on all ranks anyway
-        output_dir_rank = os.path.join(args.output_dir, f"{dist.get_rank()}")
-        model_engine.save_checkpoint(output_dir_rank)
-        tokenizer.save_pretrained(output_dir_rank)
+        # Save only model weights (not optimizer states) to minimize disk usage.
+        # With Z2 + AutoEP: non-expert params are replicated across ranks, but
+        # each rank holds a different expert shard. To save disk:
+        # - Rank 0 saves the full state dict (non-expert + its local experts)
+        # - Other ranks save only their expert shard keys (w1, w2, w3)
+        rank = dist.get_rank()
+        output_dir_rank = os.path.join(args.output_dir, str(rank))
+        os.makedirs(output_dir_rank, exist_ok=True)
+        state_dict = model_engine.module.state_dict()
+        if rank == 0:
+            torch.save(state_dict, os.path.join(output_dir_rank, "model_weights.pt"))
+            tokenizer.save_pretrained(output_dir_rank)
+        else:
+            # Only save expert shard params (3D tensors: w1, w2, w3)
+            expert_dict = {k: v for k, v in state_dict.items() if v.ndim == 3}
+            torch.save(expert_dict, os.path.join(output_dir_rank, "model_weights.pt"))
+        dist.barrier()
+        print_r(0, f"Saved model weights to {args.output_dir}/*/model_weights.pt")
 
     print_r(0, "Training complete!")
 
@@ -332,6 +350,9 @@ if __name__ == "__main__":
         type=int,
         default=0,
         help="Run evaluation every N steps (0 disables)",
+    )
+    parser.add_argument(
+        "--max_length", type=int, default=2048, help="Max sequence length"
     )
     parser.add_argument("--wandb_name", type=str, default=None)
     parser.add_argument(

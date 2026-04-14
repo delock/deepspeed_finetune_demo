@@ -1,0 +1,38 @@
+# training outputs
+output_*/
+hf_model_*/
+
+# logs
+*.log
+pytorch_log.txt
+
+# evaluation outputs
+evalplus_results/
+experiment_logs/
+
+# profiling
+trace.json
+wandb/
+
+# DeepSpeed configs (experimental, not for tracking)
+z0_*.json
+z1_*.json
+z2_*.json
+z3_*.json
+tp*.json
+so_config.json
+# except the main training config
+!z2_moonlight_autoep_muon.json
+
+# experimental scripts
+run_*.sh
+auto_sweep.sh
+diagnose_tp.py
+gen_humaneval_ds.py
+test_max_batch.py
+# root-level copies superseded by evaluate/humaneval/
+/eval_humaneval.sh
+/gen_humaneval.py
+
+# misc
+tags
