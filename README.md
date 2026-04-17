@@ -23,6 +23,7 @@ For example, if we want to run Qwen2.5-3B model with ZeRO offload on 2 GPUs, we 
 | `--eval_batch_size` | Eval batch size per rank | 1 |
 | `--eval_steps` | Run evaluation every N steps (0 disables) | 0 |
 | `--max_steps` | Stop after N steps (-1 = full epoch) | -1 |
+| `--checkpoint_steps` | Save a checkpoint every N steps (0 disables); keeps last 2 | 0 |
 | `--wandb_name` | Wandb run name (optional) | None |
 | `--num_train_epochs` | Number of training epochs | 1 |
 | `--weight_decay` | Weight decay | 0.01 |
@@ -35,6 +36,92 @@ In DeepSpeed, batch size is decided by configuration file.  However, to avoid mo
 
 ## Wandb support
 An optional `--wandb_name` can be supplied to finetune_llama.py to generate wandb graph.  But you need to modify `finetune.sh` manually to supply this argument.
+
+## Dataset support
+
+The training script auto-detects the dataset format:
+
+- **Alpaca format** (default): datasets with `instruction`/`input`/`output` fields (e.g., `sahil2801/CodeAlpaca-20k`, `tatsu-lab/alpaca`)
+- **Magicoder format**: datasets with `problem`/`solution` fields (e.g., `ise-uiuc/Magicoder-OSS-Instruct-75K`)
+
+Both formats use instruction-masked loss (only the response part contributes to loss).
+
+# Moonlight-16B-A3B with AutoEP + Muon
+
+This project supports fine-tuning [Moonlight-16B-A3B](https://huggingface.co/moonshotai/Moonlight-16B-A3B) (a 16B-parameter MoE model with 3B active parameters) using DeepSpeed AutoEP (automatic expert parallelism) and the Muon optimizer.
+
+## Quick start (8x A100 40GB)
+
+```bash
+# 1. Train
+deepspeed --num_gpus=8 finetune_llama.py \
+  --model_name moonshotai/Moonlight-16B-A3B \
+  --output_dir output_moonlight_muon \
+  --batch_size 16 --max_length 512 \
+  --deepspeed_config z2_moonlight_autoep_muon.json \
+  --dataset_name sahil2801/CodeAlpaca-20k \
+  --num_train_epochs 1
+
+# 2. Convert DeepSpeed checkpoint to HuggingFace format
+python convert_ds_to_hf.py \
+  --ds_checkpoint output_moonlight_muon/step_<LAST_STEP> \
+  --original_model moonshotai/Moonlight-16B-A3B \
+  --output_dir hf_model_muon \
+  --ep_size 8
+
+# 3. Generate HumanEval completions
+python evaluate/humaneval/gen_humaneval.py \
+  --model hf_model_muon \
+  --output evalplus_results/muon \
+  --instruction
+
+# 4. Evaluate
+python -m evalplus.evaluate \
+  --dataset humaneval \
+  --samples evalplus_results/muon/samples.jsonl
+```
+
+## Checkpoint format
+
+With AutoEP, each rank holds a different expert shard. The training script saves checkpoints to `<output_dir>/step_<N>/`:
+- `0/model_weights.pt`: full state dict (non-expert params + local experts for rank 0)
+- `1/model_weights.pt` ... `7/model_weights.pt`: expert shard params only
+
+Use `convert_ds_to_hf.py` to merge all shards back into a standard HuggingFace model.
+
+## HumanEval results
+
+| Model | HumanEval (base) | HumanEval+ |
+|-------|-----------------|------------|
+| Moonlight-16B-A3B (baseline) | 46.3% | 40.2% |
+| + Muon fine-tune on CodeAlpaca-20k (1 epoch) | 54.9% | 47.0% |
+
+## AutoEP config
+
+AutoEP config goes inside the DeepSpeed JSON under `expert_parallel`:
+
+```json
+{
+    "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "expert_w1": "gate_proj",
+        "expert_w2": "down_proj",
+        "expert_w3": "up_proj",
+        "route_scale": 2.446,
+        "load_balance_coeff": null
+    }
+}
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `autoep_size` | Number of expert-parallel ranks (typically = num_gpus) |
+| `expert_w1/w2/w3` | Names of the expert weight projections in the HF model |
+| `route_scale` | Router output scaling factor (should match `routed_scaling_factor` in model config) |
+| `load_balance_coeff` | Auxiliary load-balancing loss coefficient (`null` to disable) |
+
+Note: `route_scale` and expert group settings can be auto-filled from the HF model config if using DeepSpeed branch `gma/autoep-muon-fixes`.
 
 # Benchmarking
 
@@ -65,6 +152,7 @@ For quick start, some config files are added, you may also modify the config to 
 | z2_muon.json | ZeRO 2 with Muon optimizer |
 | z3_muon.json | ZeRO 3 with Muon optimizer |
 | tp_config.json | ZeRO 2 with AutoTP |
+| z2_moonlight_autoep_muon.json | Moonlight-16B-A3B with AutoEP + Muon |
 
 ## Muon optimizer config
 

@@ -92,13 +92,15 @@ def main():
         print(f"Resuming: {len(done)} task(s) already done, skipping them.")
 
     print(f"Loading model: {args.model}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    is_local = os.path.isdir(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True, local_files_only=is_local)
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
+        local_files_only=is_local,
     )
     model.eval()
 

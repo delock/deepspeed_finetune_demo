@@ -60,6 +60,30 @@ def preprocess_alpaca(example, tokenizer, max_length=2048):
     return tokenized
 
 
+def preprocess_magicoder(example, tokenizer, max_length=2048):
+    # Magicoder uses 'problem' / 'solution' fields
+    instruction = f"### Instruction:\n{example['problem']}\n\n### Response:\n"
+    response = example["solution"]
+
+    full_prompt = instruction + response
+    tokenized = tokenizer(
+        full_prompt, truncation=True, max_length=max_length, padding="max_length"
+    )
+
+    instruction_ids = tokenizer(instruction, add_special_tokens=False)["input_ids"]
+    instruction_len = len(instruction_ids)
+
+    seq_len = sum(1 for t in tokenized["input_ids"] if t != tokenizer.pad_token_id)
+    if instruction_len >= seq_len:
+        instruction_len = max(0, seq_len - 1)
+
+    labels = tokenized["input_ids"].copy()
+    for i in range(len(labels)):
+        if i < instruction_len or labels[i] == tokenizer.pad_token_id:
+            labels[i] = -100
+    tokenized["labels"] = labels
+    return tokenized
+
 def evaluate(model_engine, eval_dataloader):
     import torch
     from tqdm import tqdm
@@ -110,6 +134,33 @@ def print_r(rank, arg):
         print(arg)
 
 
+def _save_weights(model_engine, tokenizer, output_dir, step, keep_last=2):
+    """Save model weights for the given step; remove old checkpoints beyond keep_last."""
+    import shutil
+    rank = dist.get_rank()
+    ckpt_dir = os.path.join(output_dir, f"step_{step}")
+    rank_dir = os.path.join(ckpt_dir, str(rank))
+    os.makedirs(rank_dir, exist_ok=True)
+    state_dict = model_engine.module.state_dict()
+    if rank == 0:
+        torch.save(state_dict, os.path.join(rank_dir, "model_weights.pt"))
+        tokenizer.save_pretrained(rank_dir)
+    else:
+        expert_dict = {k: v for k, v in state_dict.items() if v.ndim == 3}
+        torch.save(expert_dict, os.path.join(rank_dir, "model_weights.pt"))
+    dist.barrier()
+    # Remove old checkpoints beyond keep_last (rank 0 only to avoid races)
+    if rank == 0:
+        ckpts = sorted(
+            [d for d in os.listdir(output_dir) if d.startswith("step_")],
+            key=lambda d: int(d.split("_")[1]),
+        )
+        for old_ckpt in ckpts[:-keep_last]:
+            shutil.rmtree(os.path.join(output_dir, old_ckpt), ignore_errors=True)
+    dist.barrier()
+    print_r(0, f"Saved checkpoint to {ckpt_dir}")
+
+
 def main(args):
     logging.basicConfig(level=logging.INFO, filename="pytorch_log.txt")
     set_seed(args.seed)
@@ -153,19 +204,26 @@ def main(args):
     model.enable_input_require_grads()
     """
 
-    # Load Alpaca 52K dataset and split into train/eval
+    # Load dataset and split into train/eval
+    # Magicoder uses 'problem'/'solution' fields; all others use Alpaca format
     dataset = load_dataset(args.dataset_name)
     split_dataset = dataset["train"].train_test_split(test_size=0.1, seed=args.seed)
     train_dataset = split_dataset["train"]
     eval_dataset = split_dataset["test"]
 
+    is_magicoder = "problem" in train_dataset.column_names
+    preprocess_fn = preprocess_magicoder if is_magicoder else preprocess_alpaca
+
+    keep_cols = {"input_ids", "attention_mask", "labels"}
     tokenized_train_dataset = train_dataset.map(
-        lambda x: preprocess_alpaca(x, tokenizer, max_length=args.max_length),
+        lambda x: preprocess_fn(x, tokenizer, max_length=args.max_length),
         batched=False,
+        remove_columns=[c for c in train_dataset.column_names if c not in keep_cols],
     )
     tokenized_eval_dataset = eval_dataset.map(
-        lambda x: preprocess_alpaca(x, tokenizer, max_length=args.max_length),
+        lambda x: preprocess_fn(x, tokenizer, max_length=args.max_length),
         batched=False,
+        remove_columns=[c for c in eval_dataset.column_names if c not in keep_cols],
     )
 
     # Create DataLoader - let DeepSpeed handle the actual batching
@@ -286,6 +344,13 @@ def main(args):
                         eval_msg = f"[Eval @ step {global_step}] Eval Loss unavailable (no eval batches processed)"
                         print(eval_msg, flush=True)
                         logging.info(eval_msg)
+            if (
+                args.checkpoint_steps > 0
+                and global_step > 0
+                and global_step % args.checkpoint_steps == 0
+                and save_checkpoint_p
+            ):
+                _save_weights(model_engine, tokenizer, args.output_dir, global_step)
             global_step += 1
             if prof != None:
                 prof.step()
@@ -302,24 +367,7 @@ def main(args):
         print_r(0, f"Average iteration time = {total_time / total_count}")
 
     if save_checkpoint_p:
-        # Save only model weights (not optimizer states) to minimize disk usage.
-        # With Z2 + AutoEP: non-expert params are replicated across ranks, but
-        # each rank holds a different expert shard. To save disk:
-        # - Rank 0 saves the full state dict (non-expert + its local experts)
-        # - Other ranks save only their expert shard keys (w1, w2, w3)
-        rank = dist.get_rank()
-        output_dir_rank = os.path.join(args.output_dir, str(rank))
-        os.makedirs(output_dir_rank, exist_ok=True)
-        state_dict = model_engine.module.state_dict()
-        if rank == 0:
-            torch.save(state_dict, os.path.join(output_dir_rank, "model_weights.pt"))
-            tokenizer.save_pretrained(output_dir_rank)
-        else:
-            # Only save expert shard params (3D tensors: w1, w2, w3)
-            expert_dict = {k: v for k, v in state_dict.items() if v.ndim == 3}
-            torch.save(expert_dict, os.path.join(output_dir_rank, "model_weights.pt"))
-        dist.barrier()
-        print_r(0, f"Saved model weights to {args.output_dir}/*/model_weights.pt")
+        _save_weights(model_engine, tokenizer, args.output_dir, global_step)
 
     print_r(0, "Training complete!")
 
@@ -357,6 +405,10 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_name", type=str, default=None)
     parser.add_argument(
         "--max_steps", type=int, default=-1, help="Stop after N steps (-1 = full epoch)"
+    )
+    parser.add_argument(
+        "--checkpoint_steps", type=int, default=0,
+        help="Save a checkpoint every N steps (0 disables); keeps last 2",
     )
     parser.add_argument(
         "--eval_batch_size", type=int, default=1, help="Eval batch size per rank"
