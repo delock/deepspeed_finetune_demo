@@ -1,19 +1,22 @@
 #!/bin/bash
 # CodeAlpaca + Muon: baseline eval -> finetune -> convert -> eval
-# Usage: bash finetune_codealpaca_and_evaluate.sh [model_name] [ds_config] [eval_steps] [wandb_name]
-# Example: bash finetune_codealpaca_and_evaluate.sh moonshotai/Moonlight-16B-A3B z2_moonlight_autoep_muon.json 100 my_run
-#          bash finetune_codealpaca_and_evaluate.sh Qwen/Qwen2.5-0.5B z2_config.json 0
+# Usage: bash run_and_evaluate.sh [model_name] [ds_config] [eval_steps] [wandb_name]
+# Example: bash run_and_evaluate.sh moonshotai/Moonlight-16B-A3B z2_moonlight_autoep_muon.json 100 my_run
+#          bash run_and_evaluate.sh Qwen/Qwen2.5-0.5B z2_config.json 0
 set -euo pipefail
 
 MODEL=${1:-moonshotai/Moonlight-16B-A3B}
 DS_CONFIG=${2:-z2_moonlight_autoep_muon.json}
-EVAL_STEPS=${3:-100}
+EVAL_STEPS=${3:-0}
 WANDB_NAME=${4:-}
+TP=${TP:-8}
 # Derive a safe directory name from model (replace / with _)
 MODEL_SLUG=$(echo "$MODEL" | tr '/' '_')
 CONFIG_SLUG=$(basename "$DS_CONFIG" .json)
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export VLLM_DISABLE_CUSTOM_ALL_REDUCE=1
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
 PYTHON=${PYTHON:-$(which python3)}
 WORKDIR=$(cd "$(dirname "$0")" && pwd)
 LOGDIR=$WORKDIR/experiment_logs
@@ -31,15 +34,18 @@ echo "Model:      ${MODEL}"
 echo "Config:     ${DS_CONFIG}"
 echo "Eval steps: ${EVAL_STEPS}"
 echo "W&B name:   ${WANDB_NAME:-<disabled>}"
+echo "TP:         ${TP}"
 echo "Start: $(date)"
-$PYTHON evaluate/humaneval/gen_humaneval.py \
-  --model $MODEL \
-  --output $BASELINE_DIR \
+$PYTHON evaluate/humaneval/gen_humaneval_vllm.py \
+  --model "$MODEL" \
+  --output "$BASELINE_DIR" \
+  --tp "$TP" \
   --instruction \
   2>&1 | tee $LOGDIR/baseline_${MODEL_SLUG}_gen.log
+
 $PYTHON -m evalplus.evaluate \
   --dataset humaneval \
-  --samples $BASELINE_DIR/samples.jsonl \
+  --samples "$BASELINE_DIR/samples.jsonl" \
   2>&1 | tee $LOGDIR/baseline_${MODEL_SLUG}_eval.log
 echo "Baseline eval done: $(date)"
 
@@ -78,18 +84,18 @@ echo "Removing DS checkpoint to save disk..."
 rm -rf $OUTPUT_DIR
 echo "DS checkpoint removed"
 
-echo "===== STEP 3: GENERATE ====="
-$PYTHON evaluate/humaneval/gen_humaneval.py \
-  --model $HF_DIR \
-  --output $EVAL_DIR \
+echo "===== STEP 3: GENERATE + EVALUATE (post-finetune) ====="
+echo "Start: $(date)"
+$PYTHON evaluate/humaneval/gen_humaneval_vllm.py \
+  --model "$HF_DIR" \
+  --output "$EVAL_DIR" \
+  --tp "$TP" \
   --instruction \
   2>&1 | tee $LOGDIR/codealpaca_${MODEL_SLUG}_${CONFIG_SLUG}_gen.log
-echo "Generate done: $(date)"
 
-echo "===== STEP 4: EVALUATE ====="
 $PYTHON -m evalplus.evaluate \
   --dataset humaneval \
-  --samples $EVAL_DIR/samples.jsonl \
+  --samples "$EVAL_DIR/samples.jsonl" \
   2>&1 | tee $LOGDIR/codealpaca_${MODEL_SLUG}_${CONFIG_SLUG}_eval.log
 echo "Evaluate done: $(date)"
 
