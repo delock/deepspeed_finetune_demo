@@ -7,9 +7,10 @@ set -euo pipefail
 
 MODEL=${1:-moonshotai/Moonlight-16B-A3B}
 DS_CONFIG=${2:-z2_moonlight_autoep_muon.json}
-EVAL_STEPS=${3:-0}
-WANDB_NAME=${4:-}
+EVAL_STEPS=${3:-100}
+WANDB_NAME=${4:-moonlight_finetune}
 TP=${TP:-8}
+BENCHMARK=${BENCHMARK:-mbpp}
 # Derive a safe directory name from model (replace / with _)
 MODEL_SLUG=$(echo "$MODEL" | tr '/' '_')
 CONFIG_SLUG=$(basename "$DS_CONFIG" .json)
@@ -35,19 +36,26 @@ echo "Config:     ${DS_CONFIG}"
 echo "Eval steps: ${EVAL_STEPS}"
 echo "W&B name:   ${WANDB_NAME:-<disabled>}"
 echo "TP:         ${TP}"
+echo "Benchmark:  ${BENCHMARK}"
 echo "Start: $(date)"
+rm -rf "$BASELINE_DIR"
 $PYTHON evaluate/humaneval/gen_humaneval_vllm.py \
-  --model "$MODEL" \
-  --output "$BASELINE_DIR" \
-  --tp "$TP" \
-  --instruction \
-  2>&1 | tee $LOGDIR/baseline_${MODEL_SLUG}_gen.log
+   --model "$MODEL" \
+   --output "$BASELINE_DIR" \
+   --dataset "$BENCHMARK" \
+   --tp "$TP" \
+   --instruction \
+   2>&1 | tee $LOGDIR/baseline_${MODEL_SLUG}_gen.log
 
 $PYTHON -m evalplus.evaluate \
-  --dataset humaneval \
+  --dataset $BENCHMARK \
   --samples "$BASELINE_DIR/samples.jsonl" \
   2>&1 | tee $LOGDIR/baseline_${MODEL_SLUG}_eval.log
 echo "Baseline eval done: $(date)"
+
+if [ "${SKIP_TRAIN:-0}" = "1" ]; then
+  echo "SKIP_TRAIN=1: skipping training and convert, jumping to post-finetune eval"
+else
 
 echo "===== STEP 1: TRAINING ====="
 echo "Start: $(date)"
@@ -64,8 +72,15 @@ deepspeed --num_gpus=8 finetune_llama.py \
 echo "Training done: $(date)"
 
 echo "===== STEP 2: CONVERT ====="
+# Find the latest checkpoint step directory
+CKPT_DIR=$(ls -d $OUTPUT_DIR/step_* 2>/dev/null | sort -t_ -k2 -n | tail -1)
+if [ -z "$CKPT_DIR" ]; then
+  # Fallback: rank dirs may be directly under OUTPUT_DIR
+  CKPT_DIR=$OUTPUT_DIR
+fi
+echo "Using checkpoint: $CKPT_DIR"
 $PYTHON convert_ds_to_hf.py \
-  --ds_checkpoint $OUTPUT_DIR \
+  --ds_checkpoint $CKPT_DIR \
   --original_model $MODEL \
   --output_dir $HF_DIR \
   --ep_size 8 \
@@ -84,17 +99,21 @@ echo "Removing DS checkpoint to save disk..."
 rm -rf $OUTPUT_DIR
 echo "DS checkpoint removed"
 
+fi # end SKIP_TRAIN
+
 echo "===== STEP 3: GENERATE + EVALUATE (post-finetune) ====="
 echo "Start: $(date)"
+rm -rf "$EVAL_DIR"
 $PYTHON evaluate/humaneval/gen_humaneval_vllm.py \
-  --model "$HF_DIR" \
-  --output "$EVAL_DIR" \
-  --tp "$TP" \
-  --instruction \
-  2>&1 | tee $LOGDIR/codealpaca_${MODEL_SLUG}_${CONFIG_SLUG}_gen.log
+   --model "$HF_DIR" \
+   --output "$EVAL_DIR" \
+   --dataset "$BENCHMARK" \
+   --tp "$TP" \
+   --instruction \
+   2>&1 | tee $LOGDIR/codealpaca_${MODEL_SLUG}_${CONFIG_SLUG}_gen.log
 
 $PYTHON -m evalplus.evaluate \
-  --dataset humaneval \
+  --dataset $BENCHMARK \
   --samples "$EVAL_DIR/samples.jsonl" \
   2>&1 | tee $LOGDIR/codealpaca_${MODEL_SLUG}_${CONFIG_SLUG}_eval.log
 echo "Evaluate done: $(date)"

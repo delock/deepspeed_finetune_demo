@@ -90,44 +90,27 @@ def evaluate(model_engine, eval_dataloader):
     from deepspeed import comm as dist
 
     model_engine.eval()
+    torch.cuda.empty_cache()
     losses = []
-    total_batches = len(eval_dataloader)
-    world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
 
-    # Split dataloader among ranks: each rank processes a subset of batches
-    # Iterate only batches where (batch_idx % world_size) == rank
     with torch.no_grad():
         if rank == 0:
-            enum = enumerate(
-                tqdm(eval_dataloader, desc=f"Evaluating [rank {rank}]", leave=False)
-            )
+            enum = tqdm(eval_dataloader, desc="Evaluating", leave=False)
         else:
-            enum = enumerate(eval_dataloader)
-        for batch_idx, batch in enum:
-            if batch_idx % world_size != rank:
-                continue
+            enum = eval_dataloader
+        for batch in enum:
             batch = {k: v.to(model_engine.device) for k, v in batch.items()}
             outputs = model_engine(**batch)
             loss = outputs.loss
             losses.append(loss.item())
+            del outputs
     model_engine.train()
 
-    # Gather total loss and total count from all ranks
-    device = model_engine.device
-    local_sum = torch.tensor([sum(losses)], dtype=torch.float32, device=device)
-    local_count = torch.tensor([len(losses)], dtype=torch.float32, device=device)
-
-    if dist.is_initialized():
-        dist.all_reduce(local_sum, op=dist.ReduceOp.SUM)
-        dist.all_reduce(local_count, op=dist.ReduceOp.SUM)
-
-    if local_count.item() == 0:
+    if len(losses) == 0:
         return None
-
-    avg_loss = (local_sum / local_count).item()
+    avg_loss = sum(losses) / len(losses)
     return avg_loss
-
 
 def print_r(rank, arg):
     if rank == dist.get_rank():
@@ -207,7 +190,7 @@ def main(args):
     # Load dataset and split into train/eval
     # Magicoder uses 'problem'/'solution' fields; all others use Alpaca format
     dataset = load_dataset(args.dataset_name)
-    split_dataset = dataset["train"].train_test_split(test_size=0.1, seed=args.seed)
+    split_dataset = dataset["train"].train_test_split(test_size=0.05, seed=args.seed)
     train_dataset = split_dataset["train"]
     eval_dataset = split_dataset["test"]
 
@@ -238,6 +221,7 @@ def main(args):
         batch_size=args.eval_batch_size,
         collate_fn=default_data_collator,
         shuffle=False,
+        drop_last=True,
     )
 
     # DeepSpeed will automatically parse the config file passed via --deepspeed argument
@@ -411,7 +395,7 @@ if __name__ == "__main__":
         help="Save a checkpoint every N steps (0 disables); keeps last 2",
     )
     parser.add_argument(
-        "--eval_batch_size", type=int, default=1, help="Eval batch size per rank"
+        "--eval_batch_size", type=int, default=4, help="Eval batch size per rank"
     )
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
