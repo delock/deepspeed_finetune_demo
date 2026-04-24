@@ -39,7 +39,7 @@ echo "TP:         ${TP}"
 echo "Benchmark:  ${BENCHMARK}"
 echo "Start: $(date)"
 rm -rf "$BASELINE_DIR"
-$PYTHON evaluate/humaneval/gen_humaneval_vllm.py \
+$PYTHON evaluate/humaneval/gen_vllm.py \
    --model "$MODEL" \
    --output "$BASELINE_DIR" \
    --dataset "$BENCHMARK" \
@@ -104,7 +104,7 @@ fi # end SKIP_TRAIN
 echo "===== STEP 3: GENERATE + EVALUATE (post-finetune) ====="
 echo "Start: $(date)"
 rm -rf "$EVAL_DIR"
-$PYTHON evaluate/humaneval/gen_humaneval_vllm.py \
+$PYTHON evaluate/humaneval/gen_vllm.py \
    --model "$HF_DIR" \
    --output "$EVAL_DIR" \
    --dataset "$BENCHMARK" \
