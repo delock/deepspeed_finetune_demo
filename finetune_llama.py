@@ -27,6 +27,65 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+DATASET_REGISTRY = {
+    "sahil2801/CodeAlpaca-20k": {
+        "split": "train",
+        "preprocessor": "alpaca",
+        "field_map": {
+            "instruction": "instruction",
+            "input": "input",
+            "output": "output",
+        },
+    },
+    "meta-math/MetaMathQA": {
+        "split": "train",
+        "preprocessor": "alpaca",
+        "field_map": {
+            "instruction": "query",
+            "input": None,
+            "output": "response",
+        },
+    },
+    "cais/mmlu": {
+        "subset": "all",
+        "split": "auxiliary_train",
+        "preprocessor": "mmlu",
+        "field_map": None,
+    },
+}
+
+
+def load_and_prepare_dataset(dataset_name):
+    if dataset_name not in DATASET_REGISTRY:
+        raise ValueError(
+            f"Dataset '{dataset_name}' not in DATASET_REGISTRY. "
+            f"Available: {list(DATASET_REGISTRY.keys())}"
+        )
+    config = DATASET_REGISTRY[dataset_name]
+
+    load_kwargs = {"path": dataset_name}
+    if config.get("subset"):
+        load_kwargs["name"] = config["subset"]
+    dataset = load_dataset(**load_kwargs)
+    raw_dataset = dataset[config["split"]]
+
+    field_map = config.get("field_map")
+    preprocessor = config["preprocessor"]
+
+    if preprocessor == "alpaca" and field_map:
+        rename_map = {}
+        for target_field, source_field in field_map.items():
+            if source_field is not None and source_field != target_field:
+                rename_map[source_field] = target_field
+        if rename_map:
+            raw_dataset = raw_dataset.rename_columns(rename_map)
+
+    if preprocessor == "alpaca" and "input" not in raw_dataset.column_names:
+        raw_dataset = raw_dataset.add_column("input", [""] * len(raw_dataset))
+
+    return raw_dataset, preprocessor
+
+
 def preprocess_alpaca(example, tokenizer, max_length=2048):
     # Build instruction part (will be masked from loss)
     instruction = f"### Instruction:\n{example['instruction']}\n\n"
@@ -83,6 +142,46 @@ def preprocess_magicoder(example, tokenizer, max_length=2048):
             labels[i] = -100
     tokenized["labels"] = labels
     return tokenized
+
+
+def preprocess_mmlu(example, tokenizer, max_length=2048):
+    choices = example["choices"]
+    labels = "ABCDEFGHIJ"
+    instruction = f"### Instruction:\n{example['question']}\n"
+    for i, choice in enumerate(choices):
+        instruction += f"{labels[i]}. {choice}\n"
+    instruction += "\nAnswer with the letter of the correct choice.\n\n### Response:\n"
+    answer_letter = example["answer"]
+    if isinstance(answer_letter, int):
+        answer_letter = labels[answer_letter]
+    response = answer_letter
+
+    full_prompt = instruction + response
+    tokenized = tokenizer(
+        full_prompt, truncation=True, max_length=max_length, padding="max_length"
+    )
+
+    instruction_ids = tokenizer(instruction, add_special_tokens=False)["input_ids"]
+    instruction_len = len(instruction_ids)
+
+    seq_len = sum(1 for t in tokenized["input_ids"] if t != tokenizer.pad_token_id)
+    if instruction_len >= seq_len:
+        instruction_len = max(0, seq_len - 1)
+
+    labels_out = tokenized["input_ids"].copy()
+    for i in range(len(labels_out)):
+        if i < instruction_len or labels_out[i] == tokenizer.pad_token_id:
+            labels_out[i] = -100
+    tokenized["labels"] = labels_out
+    return tokenized
+
+
+PREPROCESSORS = {
+    "alpaca": preprocess_alpaca,
+    "magicoder": preprocess_magicoder,
+    "mmlu": preprocess_mmlu,
+}
+
 
 def evaluate(model_engine, eval_dataloader):
     import torch
@@ -188,14 +287,21 @@ def main(args):
     """
 
     # Load dataset and split into train/eval
-    # Magicoder uses 'problem'/'solution' fields; all others use Alpaca format
-    dataset = load_dataset(args.dataset_name)
-    split_dataset = dataset["train"].train_test_split(test_size=0.05, seed=args.seed)
+    if args.dataset_name in DATASET_REGISTRY:
+        raw_dataset, preprocessor_name = load_and_prepare_dataset(args.dataset_name)
+        preprocess_fn = PREPROCESSORS[preprocessor_name]
+    else:
+        dataset = load_dataset(args.dataset_name)
+        raw_dataset = dataset["train"]
+        if "problem" in raw_dataset.column_names:
+            preprocessor_name = "magicoder"
+        else:
+            preprocessor_name = "alpaca"
+        preprocess_fn = PREPROCESSORS[preprocessor_name]
+
+    split_dataset = raw_dataset.train_test_split(test_size=0.05, seed=args.seed)
     train_dataset = split_dataset["train"]
     eval_dataset = split_dataset["test"]
-
-    is_magicoder = "problem" in train_dataset.column_names
-    preprocess_fn = preprocess_magicoder if is_magicoder else preprocess_alpaca
 
     keep_cols = {"input_ids", "attention_mask", "labels"}
     tokenized_train_dataset = train_dataset.map(
