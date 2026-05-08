@@ -6,13 +6,36 @@
 - Select a CUDA 12.x base image
 - Ensure `/workspace` has enough disk space (~500GB)
 
+## Step 0: Verify GPU Health
+
+RunPod machines can have faulty GPUs. Always test before investing time in setup.
+
+```bash
+/workspace/miniforge/envs/ds/bin/python -c "
+import torch
+for i in range(torch.cuda.device_count()):
+    try:
+        torch.cuda.set_device(i)
+        x = torch.zeros(1, device=i)
+        print(f'GPU {i}: OK, mem={torch.cuda.mem_get_info(i)[0]/1e9:.1f}GB free')
+    except Exception as e:
+        print(f'GPU {i}: FAIL - {e}')
+"
+```
+
+If any GPU fails, request a new node from RunPod. Do NOT proceed with faulty GPUs.
+
 ## Environment Setup
 
 ### 1. Create conda environment
 
 ```bash
-/workspace/miniforge/bin/conda create -n ds python=3.11 -y -p /workspace/ds
+/workspace/miniforge/bin/conda create -n ds python=3.11 -y
+/workspace/miniforge/bin/conda install -n ds pip -y
 ```
+
+Note: conda env will be at `/workspace/miniforge/envs/ds/`. Use `-n ds` (not `-p`) because
+`-n` and `-p` conflict. Then install pip separately since conda doesn't include it by default.
 
 If miniforge is not installed:
 
@@ -20,6 +43,8 @@ If miniforge is not installed:
 curl -L -o /workspace/miniforge.sh https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
 bash /workspace/miniforge.sh -b -p /workspace/miniforge
 ```
+
+All pip commands below use `/workspace/miniforge/envs/ds/bin/pip`.
 
 ### 2. Install PyTorch + vLLM + transformers
 
@@ -41,7 +66,7 @@ mkdir -p $HF_HOME $PIP_CACHE
 ### 4. Install missing dependencies
 
 ```bash
-/workspace/ds/bin/pip install accelerate --cache-dir $PIP_CACHE
+/workspace/ds/bin/pip install accelerate wandb --cache-dir $PIP_CACHE
 /workspace/ds/bin/pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" --cache-dir $PIP_CACHE
 ```
 
