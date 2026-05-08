@@ -9,7 +9,7 @@
     "optimizer": {
         "type": "Muon",
         "params": {
-            "muon_lr": 0.002,
+            "muon_lr": 2e-04,
             "adam_lr": 2e-06,
             "momentum": 0.95,
             "ns_method": "gram",
