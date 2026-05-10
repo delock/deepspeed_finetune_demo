@@ -75,6 +75,13 @@ DATASET_REGISTRY = {
         "preprocessor": "arc_mc",
         "field_map": None,
     },
+    "mandarjoshi/trivia_qa": {
+        "subset": "rc.nocontext",
+        "split": "train",
+        "preprocessor": "triviaqa",
+        "field_map": None,
+        "sample_rate": 0.2,
+    },
 }
 
 
@@ -324,6 +331,30 @@ def preprocess_arc_mc(example, tokenizer, max_length=2048):
     return tokenized
 
 
+def preprocess_triviaqa(example, tokenizer, max_length=2048):
+    instruction = f"### Instruction:\n{example['question']}\n\n### Response:\n"
+    response = example["answer"]["value"]
+
+    full_prompt = instruction + response
+    tokenized = tokenizer(
+        full_prompt, truncation=True, max_length=max_length, padding="max_length"
+    )
+
+    instruction_ids = tokenizer(instruction, add_special_tokens=False)["input_ids"]
+    instruction_len = len(instruction_ids)
+
+    seq_len = sum(1 for t in tokenized["input_ids"] if t != tokenizer.pad_token_id)
+    if instruction_len >= seq_len:
+        instruction_len = max(0, seq_len - 1)
+
+    labels_out = tokenized["input_ids"].copy()
+    for i in range(len(labels_out)):
+        if i < instruction_len or labels_out[i] == tokenizer.pad_token_id:
+            labels_out[i] = -100
+    tokenized["labels"] = labels_out
+    return tokenized
+
+
 PREPROCESSORS = {
     "alpaca": preprocess_alpaca,
     "magicoder": preprocess_magicoder,
@@ -331,6 +362,7 @@ PREPROCESSORS = {
     "codesearchnet": preprocess_codesearchnet,
     "sciq": preprocess_sciq,
     "arc_mc": preprocess_arc_mc,
+    "triviaqa": preprocess_triviaqa,
 }
 
 
