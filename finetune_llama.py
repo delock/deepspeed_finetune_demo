@@ -225,16 +225,21 @@ def preprocess_codesearchnet(example, tokenizer, max_length=2048):
 
 
 def preprocess_sciq(example, tokenizer, max_length=2048):
+    import random
     labels = "ABCD"
     choices = [example["correct_answer"],
                example["distractor1"],
                example["distractor2"],
                example["distractor3"]]
-    answer_letter = "A"
+    rng = random.Random(hash(example["question"]))
+    paired = list(zip(choices, labels))
+    rng.shuffle(paired)
+    shuffled_choices, shuffled_labels = zip(*paired)
+    answer_letter = shuffled_labels[0]
 
     instruction = f"### Instruction:\n{example['question']}\n"
-    for i, choice in enumerate(choices):
-        instruction += f"{labels[i]}. {choice}\n"
+    for choice, label in zip(shuffled_choices, shuffled_labels):
+        instruction += f"{label}. {choice}\n"
     instruction += "\nAnswer with the letter of the correct choice.\n\n### Response:\n"
     response = answer_letter
 
