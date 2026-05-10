@@ -64,6 +64,17 @@ DATASET_REGISTRY = {
         "preprocessor": "sciq",
         "field_map": None,
     },
+    "arc_train": {
+        "merge_sources": [
+            {"path": "allenai/openbookqa", "split": "train"},
+            {"path": "allenai/ai2_arc", "subset": "ARC-Easy", "split": "train"},
+            {"path": "allenai/ai2_arc", "subset": "ARC-Easy", "split": "validation"},
+            {"path": "allenai/ai2_arc", "subset": "ARC-Challenge", "split": "train"},
+            {"path": "allenai/ai2_arc", "subset": "ARC-Challenge", "split": "validation"},
+        ],
+        "preprocessor": "arc_mc",
+        "field_map": None,
+    },
 }
 
 
@@ -75,11 +86,27 @@ def load_and_prepare_dataset(dataset_name):
         )
     config = DATASET_REGISTRY[dataset_name]
 
-    load_kwargs = {"path": dataset_name}
-    if config.get("subset"):
-        load_kwargs["name"] = config["subset"]
-    dataset = load_dataset(**load_kwargs)
-    raw_dataset = dataset[config["split"]]
+    merge_sources = config.get("merge_sources")
+    if merge_sources:
+        from datasets import concatenate_datasets
+        parts = []
+        for src in merge_sources:
+            kwargs = {"path": src["path"]}
+            if src.get("subset"):
+                kwargs["name"] = src["subset"]
+            ds = load_dataset(**kwargs)
+            split_ds = ds[src["split"]]
+            if "question_stem" in split_ds.column_names:
+                split_ds = split_ds.rename_column("question_stem", "question")
+            parts.append(split_ds)
+        raw_dataset = concatenate_datasets(parts)
+        print(f"Merged {len(merge_sources)} sources into {len(raw_dataset)} examples")
+    else:
+        load_kwargs = {"path": dataset_name}
+        if config.get("subset"):
+            load_kwargs["name"] = config["subset"]
+        dataset = load_dataset(**load_kwargs)
+        raw_dataset = dataset[config["split"]]
 
     sample_rate = config.get("sample_rate")
     if sample_rate is not None and sample_rate < 1.0:
@@ -263,12 +290,47 @@ def preprocess_sciq(example, tokenizer, max_length=2048):
     return tokenized
 
 
+def preprocess_arc_mc(example, tokenizer, max_length=2048):
+    labels = "ABCD"
+    question = example["question"]
+    choices = example["choices"]
+    choice_texts = choices["text"]
+    choice_labels = choices["label"]
+    answer = example["answerKey"]
+
+    instruction = f"### Instruction:\n{question}\n"
+    for label, text in zip(choice_labels, choice_texts):
+        instruction += f"{label}. {text}\n"
+    instruction += "\nAnswer with the letter of the correct choice.\n\n### Response:\n"
+    response = answer
+
+    full_prompt = instruction + response
+    tokenized = tokenizer(
+        full_prompt, truncation=True, max_length=max_length, padding="max_length"
+    )
+
+    instruction_ids = tokenizer(instruction, add_special_tokens=False)["input_ids"]
+    instruction_len = len(instruction_ids)
+
+    seq_len = sum(1 for t in tokenized["input_ids"] if t != tokenizer.pad_token_id)
+    if instruction_len >= seq_len:
+        instruction_len = max(0, seq_len - 1)
+
+    labels_out = tokenized["input_ids"].copy()
+    for i in range(len(labels_out)):
+        if i < instruction_len or labels_out[i] == tokenizer.pad_token_id:
+            labels_out[i] = -100
+    tokenized["labels"] = labels_out
+    return tokenized
+
+
 PREPROCESSORS = {
     "alpaca": preprocess_alpaca,
     "magicoder": preprocess_magicoder,
     "mmlu": preprocess_mmlu,
     "codesearchnet": preprocess_codesearchnet,
     "sciq": preprocess_sciq,
+    "arc_mc": preprocess_arc_mc,
 }
 
 
