@@ -129,59 +129,266 @@ For Muon with 8 GPUs, autoep_size stays at 8.
 ```bash
 export HF_HOME=/workspace/.hf_cache
 cd /workspace/deepspeed_finetune_demo
-mkdir -p experiment_logs eval_results
+mkdir -p experiment_logs eval_results evalplus_results
 NUM_GPUS=4  # or 8
+PYTHON=/workspace/miniforge/envs/ds/bin/python
+DS=/workspace/miniforge/envs/ds/bin/deepspeed
 ```
+
+---
+
+## MMLU Experiments
+
+Training dataset: `cais/mmlu` (auxiliary_train split, ~95k examples).
+Eval uses `evaluate/mmlu/gen_mmlu.py` (vLLM generation) + `evaluate/mmlu/eval_mmlu.py` (accuracy scoring).
 
 ### MMLU Baseline Eval (no training)
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 /workspace/ds/bin/python evaluate/mmlu/gen_mmlu.py \
-  --model_name moonshotai/Moonlight-16B-A3B \
-  --output_dir eval_results/mmlu_baseline --tp 2
+CUDA_VISIBLE_DEVICES=0,1 $PYTHON evaluate/mmlu/gen_mmlu.py \
+  --model moonshotai/Moonlight-16B-A3B \
+  --output eval_results/mmlu_baseline --tp 2
 
-/workspace/ds/bin/python evaluate/mmlu/eval_mmlu.py --samples eval_results/mmlu_baseline/samples.jsonl
+$PYTHON evaluate/mmlu/eval_mmlu.py --samples eval_results/mmlu_baseline/samples.jsonl
 ```
 
-### AdamW MMLU Finetune
+### MMLU AdamW Finetune
 
 ```bash
-/workspace/ds/bin/deepspeed --num_gpus=$NUM_GPUS finetune_llama.py \
+$DS --num_gpus=$NUM_GPUS finetune_llama.py \
   --model_name moonshotai/Moonlight-16B-A3B \
   --output_dir output_mmlu_adam \
   --batch_size 16 --max_length 512 \
   --deepspeed_config z2_adam_${NUM_GPUS}gpu.json \
   --dataset_name cais/mmlu \
   --num_train_epochs 1 \
-  2>&1 | tee experiment_logs/mmlu_adam_train.log | tail -1 &
+  2>&1 | tee experiment_logs/mmlu_adam_train.log &
 ```
 
-### Muon MMLU Finetune
+### MMLU Muon Finetune
 
 ```bash
-/workspace/ds/bin/deepspeed --num_gpus=$NUM_GPUS finetune_llama.py \
+$DS --num_gpus=$NUM_GPUS finetune_llama.py \
   --model_name moonshotai/Moonlight-16B-A3B \
   --output_dir output_mmlu_muon \
   --batch_size 16 --max_length 512 \
   --deepspeed_config z2_muon_${NUM_GPUS}gpu.json \
   --dataset_name cais/mmlu \
   --num_train_epochs 1 \
-  2>&1 | tee experiment_logs/mmlu_muon_train.log | tail -1 &
+  2>&1 | tee experiment_logs/mmlu_muon_train.log &
 ```
 
-### Eval Finetuned Models
+### MMLU Convert & Eval Finetuned Models
+
+After training completes, convert DeepSpeed checkpoints to HF format, then evaluate:
 
 ```bash
-# AdamW
-CUDA_VISIBLE_DEVICES=0,1 /workspace/ds/bin/python evaluate/mmlu/gen_mmlu.py \
-  --model_path output_mmlu_adam --output_dir eval_results/mmlu_adam --tp 2
-/workspace/ds/bin/python evaluate/mmlu/eval_mmlu.py --samples eval_results/mmlu_adam/samples.jsonl
+# Convert AdamW checkpoint
+$PYTHON convert_ds_to_hf.py \
+  --ds_checkpoint output_mmlu_adam \
+  --original_model moonshotai/Moonlight-16B-A3B \
+  --output_dir hf_model_mmlu_adam \
+  --ep_size $NUM_GPUS
 
-# Muon
-CUDA_VISIBLE_DEVICES=0,1 /workspace/ds/bin/python evaluate/mmlu/gen_mmlu.py \
-  --model_path output_mmlu_muon --output_dir eval_results/mmlu_muon --tp 2
-/workspace/ds/bin/python evaluate/mmlu/eval_mmlu.py --samples eval_results/mmlu_muon/samples.jsonl
+# Convert Muon checkpoint
+$PYTHON convert_ds_to_hf.py \
+  --ds_checkpoint output_mmlu_muon \
+  --original_model moonshotai/Moonlight-16B-A3B \
+  --output_dir hf_model_mmlu_muon \
+  --ep_size $NUM_GPUS
+
+# Eval AdamW
+CUDA_VISIBLE_DEVICES=0,1 $PYTHON evaluate/mmlu/gen_mmlu.py \
+  --model hf_model_mmlu_adam --output eval_results/mmlu_adam --tp 2
+$PYTHON evaluate/mmlu/eval_mmlu.py --samples eval_results/mmlu_adam/samples.jsonl
+
+# Eval Muon
+CUDA_VISIBLE_DEVICES=0,1 $PYTHON evaluate/mmlu/gen_mmlu.py \
+  --model hf_model_mmlu_muon --output eval_results/mmlu_muon --tp 2
+$PYTHON evaluate/mmlu/eval_mmlu.py --samples eval_results/mmlu_muon/samples.jsonl
 ```
+
+### MMLU Previous Results (4x H200, autoep_size=4)
+
+| Optimizer | Learning Rate | adam_lr | MMLU Accuracy |
+|-----------|--------------|---------|---------------|
+| baseline  | —            | —       | 0.401 (40.05%) |
+| AdamW     | 2e-6         | —       | 0.660 (65.96%) |
+| Muon      | 2e-4         | 2e-6    | 0.677 (67.66%) |
+
+---
+
+## MBPP Experiments
+
+Training dataset: `sahil2801/CodeAlpaca-20k` (code instruction tuning).
+Eval uses `evaluate/humaneval/gen_vllm.py --dataset mbpp` (vLLM generation) + `evalplus.evaluate` (pass@1 scoring via EvalPlus).
+
+### Install EvalPlus (MBPP eval dependency)
+
+```bash
+/workspace/miniforge/envs/ds/bin/pip install evalplus --cache-dir $PIP_CACHE
+```
+
+### MBPP Baseline Eval (no training)
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 $PYTHON evaluate/humaneval/gen_vllm.py \
+  --model moonshotai/Moonlight-16B-A3B \
+  --output evalplus_results/mbpp_baseline \
+  --dataset mbpp --tp 2
+
+$PYTHON -m evalplus.evaluate --dataset mbpp \
+  --samples "evalplus_results/mbpp_baseline/*mbpp*" 2>&1 | tee experiment_logs/mbpp_baseline_eval.log
+```
+
+### MBPP AdamW Finetune
+
+```bash
+$DS --num_gpus=$NUM_GPUS finetune_llama.py \
+  --model_name moonshotai/Moonlight-16B-A3B \
+  --output_dir output_mbpp_adam \
+  --batch_size 16 --max_length 512 \
+  --deepspeed_config z2_adam_${NUM_GPUS}gpu.json \
+  --dataset_name sahil2801/CodeAlpaca-20k \
+  --num_train_epochs 1 \
+  2>&1 | tee experiment_logs/mbpp_adam_train.log &
+```
+
+### MBPP Muon Finetune
+
+```bash
+$DS --num_gpus=$NUM_GPUS finetune_llama.py \
+  --model_name moonshotai/Moonlight-16B-A3B \
+  --output_dir output_mbpp_muon \
+  --batch_size 16 --max_length 512 \
+  --deepspeed_config z2_muon_${NUM_GPUS}gpu.json \
+  --dataset_name sahil2801/CodeAlpaca-20k \
+  --num_train_epochs 1 \
+  2>&1 | tee experiment_logs/mbpp_muon_train.log &
+```
+
+### MBPP Convert & Eval Finetuned Models
+
+```bash
+# Convert AdamW checkpoint
+$PYTHON convert_ds_to_hf.py \
+  --ds_checkpoint output_mbpp_adam \
+  --original_model moonshotai/Moonlight-16B-A3B \
+  --output_dir hf_model_mbpp_adam \
+  --ep_size $NUM_GPUS
+
+# Convert Muon checkpoint
+$PYTHON convert_ds_to_hf.py \
+  --ds_checkpoint output_mbpp_muon \
+  --original_model moonshotai/Moonlight-16B-A3B \
+  --output_dir hf_model_mbpp_muon \
+  --ep_size $NUM_GPUS
+
+# Eval AdamW
+CUDA_VISIBLE_DEVICES=0,1 $PYTHON evaluate/humaneval/gen_vllm.py \
+  --model hf_model_mbpp_adam \
+  --output evalplus_results/mbpp_adam \
+  --dataset mbpp --tp 2
+$PYTHON -m evalplus.evaluate --dataset mbpp \
+  --samples "evalplus_results/mbpp_adam/*mbpp*" 2>&1 | tee experiment_logs/mbpp_adam_eval.log
+
+# Eval Muon
+CUDA_VISIBLE_DEVICES=0,1 $PYTHON evaluate/humaneval/gen_vllm.py \
+  --model hf_model_mbpp_muon \
+  --output evalplus_results/mbpp_muon \
+  --dataset mbpp --tp 2
+$PYTHON -m evalplus.evaluate --dataset mbpp \
+  --samples "evalplus_results/mbpp_muon/*mbpp*" 2>&1 | tee experiment_logs/mbpp_muon_eval.log
+```
+
+### MBPP Previous Results (4x H200, autoep_size=4)
+
+| Optimizer | Learning Rate | adam_lr | MBPP | MBPP+ |
+|-----------|--------------|---------|------|-------|
+| baseline  | —            | —       | 0.495| 0.431 |
+| AdamW     | 2e-6         | —       | 0.611| 0.505 |
+| Muon      | 2e-4         | 2e-6    | 0.661| 0.553 |
+
+---
+
+## GSM8K Experiments
+
+Training dataset: `meta-math/MetaMathQA` (~375k math reasoning examples).
+Eval uses `evaluate/gsm8k/gen_gsm8k.py` (vLLM generation) + `evaluate/gsm8k/eval_gsm8k.py` (accuracy scoring).
+
+### GSM8K Baseline Eval (no training)
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 $PYTHON evaluate/gsm8k/gen_gsm8k.py \
+  --model moonshotai/Moonlight-16B-A3B \
+  --output eval_results/gsm8k_baseline --tp 2
+
+$PYTHON evaluate/gsm8k/eval_gsm8k.py --samples eval_results/gsm8k_baseline/samples.jsonl
+```
+
+### GSM8K AdamW Finetune
+
+```bash
+$DS --num_gpus=$NUM_GPUS finetune_llama.py \
+  --model_name moonshotai/Moonlight-16B-A3B \
+  --output_dir output_gsm8k_adam \
+  --batch_size 16 --max_length 512 \
+  --deepspeed_config z2_adam_${NUM_GPUS}gpu.json \
+  --dataset_name meta-math/MetaMathQA \
+  --num_train_epochs 1 \
+  2>&1 | tee experiment_logs/gsm8k_adam_train.log &
+```
+
+### GSM8K Muon Finetune
+
+```bash
+$DS --num_gpus=$NUM_GPUS finetune_llama.py \
+  --model_name moonshotai/Moonlight-16B-A3B \
+  --output_dir output_gsm8k_muon \
+  --batch_size 16 --max_length 512 \
+  --deepspeed_config z2_muon_${NUM_GPUS}gpu.json \
+  --dataset_name meta-math/MetaMathQA \
+  --num_train_epochs 1 \
+  2>&1 | tee experiment_logs/gsm8k_muon_train.log &
+```
+
+### GSM8K Convert & Eval Finetuned Models
+
+```bash
+# Convert AdamW checkpoint (use step subdirectory)
+$PYTHON convert_ds_to_hf.py \
+  --ds_checkpoint output_gsm8k_adam/step_XXXXX \
+  --original_model moonshotai/Moonlight-16B-A3B \
+  --output_dir hf_model_gsm8k_adam \
+  --ep_size $NUM_GPUS
+
+# Convert Muon checkpoint
+$PYTHON convert_ds_to_hf.py \
+  --ds_checkpoint output_gsm8k_muon/step_XXXXX \
+  --original_model moonshotai/Moonlight-16B-A3B \
+  --output_dir hf_model_gsm8k_muon \
+  --ep_size $NUM_GPUS
+
+# Eval AdamW
+CUDA_VISIBLE_DEVICES=0,1 $PYTHON evaluate/gsm8k/gen_gsm8k.py \
+  --model hf_model_gsm8k_adam --output eval_results/gsm8k_adam --tp 2
+$PYTHON evaluate/gsm8k/eval_gsm8k.py --samples eval_results/gsm8k_adam/samples.jsonl
+
+# Eval Muon
+CUDA_VISIBLE_DEVICES=0,1 $PYTHON evaluate/gsm8k/gen_gsm8k.py \
+  --model hf_model_gsm8k_muon --output eval_results/gsm8k_muon --tp 2
+$PYTHON evaluate/gsm8k/eval_gsm8k.py --samples eval_results/gsm8k_muon/samples.jsonl
+```
+
+### GSM8K Results (4x H200, autoep_size=4)
+
+| Optimizer | Learning Rate | adam_lr | GSM8K |
+|-----------|--------------|---------|-------|
+| baseline  | —            | —       | 52.62% |
+| AdamW     | 2e-6         | —       | 81.96% |
+| Muon      | 2e-4         | 2e-6    | 79.91% |
+
+---
 
 ## Important Notes
 
@@ -190,4 +397,4 @@ CUDA_VISIBLE_DEVICES=0,1 /workspace/ds/bin/python evaluate/mmlu/gen_mmlu.py \
 - `CUDA_VISIBLE_DEVICES=0,1` limits eval to first 2 GPUs
 - HF cache must be on `/workspace` (root partition only 20GB)
 - pip cache must also be on `/workspace` to avoid filling root partition
-- Previous results: MMLU baseline = 40.05% (5624/14042 correct)
+- After training, run `convert_ds_to_hf.py` before eval (DeepSpeed checkpoints are not directly loadable by vLLM)
