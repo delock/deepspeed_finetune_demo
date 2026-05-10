@@ -52,7 +52,6 @@ def main():
     sampling_params = SamplingParams(
         temperature=0,
         max_tokens=args.max_new_tokens,
-        logprobs=20,
     )
 
     print("Loading TruthfulQA dataset (multiple_choice)")
@@ -82,17 +81,12 @@ def main():
     with open(out_path, "w") as f_out:
         for m, output in zip(meta, outputs):
             completion = output.outputs[0].text.strip()
-            logprobs_dict = {}
-            if output.outputs[0].logprobs and output.outputs[0].logprobs[0]:
-                for token, lp in output.outputs[0].logprobs[0].items():
-                    logprobs_dict[token.token] = lp.logprob
             sample = {
                 "task_id": m["task_id"],
                 "question": m["question"],
                 "choices": m["choices"],
                 "labels": m["labels"],
                 "raw_completion": completion,
-                "first_token_logprobs": logprobs_dict,
             }
             f_out.write(json.dumps(sample) + "\n")
 
