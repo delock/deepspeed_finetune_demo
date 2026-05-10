@@ -81,7 +81,7 @@ def load_and_prepare_dataset(dataset_name):
         n = len(raw_dataset)
         keep = max(1, int(n * sample_rate))
         raw_dataset = raw_dataset.shuffle(seed=42).select(range(keep))
-        print_r(0, f"Downsampled {dataset_name}: {n} -> {keep} (rate={sample_rate})")
+        print(f"Downsampled {dataset_name}: {n} -> {keep} (rate={sample_rate})")
 
     field_map = config.get("field_map")
     preprocessor = config["preprocessor"]
