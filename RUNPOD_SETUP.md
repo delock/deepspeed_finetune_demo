@@ -57,9 +57,11 @@ mkdir -p $HF_HOME $PIP_CACHE
 /workspace/ds/bin/pip install vllm==0.7.2 transformers datasets --cache-dir $PIP_CACHE
 ```
 
-### 3. Install local DeepSpeed
+### 3. Clone and install DeepSpeed (autoep+Muon branch)
 
 ```bash
+cd /workspace
+git clone -b gma/autoep-muon-fixes https://github.com/deepspeedai/DeepSpeed.git
 /workspace/ds/bin/pip install -e /workspace/DeepSpeed --cache-dir $PIP_CACHE
 ```
 
@@ -78,12 +80,11 @@ mkdir -p $HF_HOME $PIP_CACHE
 /workspace/ds/bin/python -c "import flash_attn; print(f'flash_attn: {flash_attn.__version__}')"
 ```
 
-### 6. Clone repos (if not already on /workspace)
+### 6. Clone finetune demo repo (if not already on /workspace)
 
 ```bash
 cd /workspace
 git clone -b add_mmlu_gsm8k https://github.com/comaniac/deepspeed_finetune_demo.git
-git clone -b gma/autoep-muon-fixes https://github.com/deepspeedai/DeepSpeed.git
 ```
 
 ## GPU Count Configuration
@@ -208,14 +209,6 @@ CUDA_VISIBLE_DEVICES=0,1 $PYTHON evaluate/mmlu/gen_mmlu.py \
 $PYTHON evaluate/mmlu/eval_mmlu.py --samples eval_results/mmlu_muon/samples.jsonl
 ```
 
-### MMLU Previous Results (4x H200, autoep_size=4)
-
-| Optimizer | Learning Rate | adam_lr | MMLU Accuracy |
-|-----------|--------------|---------|---------------|
-| baseline  | —            | —       | 0.401 (40.05%) |
-| AdamW     | 2e-6         | —       | 0.660 (65.96%) |
-| Muon      | 2e-4         | 2e-6    | 0.677 (67.66%) |
-
 ---
 
 ## MBPP Experiments
@@ -301,20 +294,14 @@ $PYTHON -m evalplus.evaluate --dataset mbpp \
   --samples "evalplus_results/mbpp_muon/*mbpp*" 2>&1 | tee experiment_logs/mbpp_muon_eval.log
 ```
 
-### MBPP Previous Results (4x H200, autoep_size=4)
-
-| Optimizer | Learning Rate | adam_lr | MBPP | MBPP+ |
-|-----------|--------------|---------|------|-------|
-| baseline  | —            | —       | 0.495| 0.431 |
-| AdamW     | 2e-6         | —       | 0.611| 0.505 |
-| Muon      | 2e-4         | 2e-6    | 0.661| 0.553 |
-
 ---
 
 ## GSM8K Experiments
 
-Training dataset: `meta-math/MetaMathQA` (~375k math reasoning examples).
+Training dataset: `meta-math/MetaMathQA` (~375k examples, `sample_rate=0.1` → ~39.5k used).
 Eval uses `evaluate/gsm8k/gen_gsm8k.py` (vLLM generation) + `evaluate/gsm8k/eval_gsm8k.py` (accuracy scoring).
+
+Note: `sample_rate=0.1` is configured in the `DATASET_REGISTRY` inside `finetune_llama.py`. The training command does not need an extra flag.
 
 ### GSM8K Baseline Eval (no training)
 
@@ -379,14 +366,6 @@ CUDA_VISIBLE_DEVICES=0,1 $PYTHON evaluate/gsm8k/gen_gsm8k.py \
   --model hf_model_gsm8k_muon --output eval_results/gsm8k_muon --tp 2
 $PYTHON evaluate/gsm8k/eval_gsm8k.py --samples eval_results/gsm8k_muon/samples.jsonl
 ```
-
-### GSM8K Results (4x H200, autoep_size=4)
-
-| Optimizer | Learning Rate | adam_lr | GSM8K |
-|-----------|--------------|---------|-------|
-| baseline  | —            | —       | 52.62% |
-| AdamW     | 2e-6         | —       | 81.96% |
-| Muon      | 2e-4         | 2e-6    | 79.91% |
 
 ---
 
