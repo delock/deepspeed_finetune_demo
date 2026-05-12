@@ -3,7 +3,7 @@ import time
 import deepspeed
 import argparse
 from datasets import load_dataset
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import json
@@ -209,13 +209,6 @@ def main(args):
         remove_columns=[c for c in eval_dataset.column_names if c not in keep_cols],
     )
 
-    # Create DataLoader - let DeepSpeed handle the actual batching
-    train_dataloader = DataLoader(
-        tokenized_train_dataset,
-        batch_size=1,  # This will be overridden by DeepSpeed config
-        collate_fn=default_data_collator,
-        shuffle=True,
-    )
     eval_dataloader = DataLoader(
         tokenized_eval_dataset,
         batch_size=args.eval_batch_size,
@@ -224,7 +217,6 @@ def main(args):
         drop_last=True,
     )
 
-    # DeepSpeed will automatically parse the config file passed via --deepspeed argument
     model_engine, optimizer, train_dataloader, lr_scheduler = deepspeed.initialize(
         args=args,
         model=model,
@@ -232,6 +224,20 @@ def main(args):
         training_data=tokenized_train_dataset,
         collate_fn=default_data_collator,
         config=ds_config,
+    )
+
+    train_sampler = DistributedSampler(
+        tokenized_train_dataset,
+        shuffle=True,
+        seed=args.seed,
+    )
+    per_device_batch = model_engine.train_micro_batch_size_per_gpu()
+    train_dataloader = DataLoader(
+        tokenized_train_dataset,
+        batch_size=per_device_batch,
+        sampler=train_sampler,
+        collate_fn=default_data_collator,
+        drop_last=True,
     )
 
     model_engine.train()
@@ -265,6 +271,7 @@ def main(args):
     global_samples = 0
     for epoch in range(args.num_train_epochs):
         print_r(0, f"Starting epoch {epoch + 1}/{args.num_train_epochs}")
+        train_dataloader.sampler.set_epoch(epoch)
 
         for step, batch in enumerate(train_dataloader):
             if prof != None and global_step == args.profile_start:
