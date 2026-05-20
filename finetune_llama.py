@@ -45,6 +45,7 @@ DATASET_REGISTRY = {
             "input": None,
             "output": "response",
         },
+        "sample_rate": 0.1,
     },
     "cais/mmlu": {
         "subset": "all",
@@ -68,6 +69,13 @@ def load_and_prepare_dataset(dataset_name):
         load_kwargs["name"] = config["subset"]
     dataset = load_dataset(**load_kwargs)
     raw_dataset = dataset[config["split"]]
+
+    sample_rate = config.get("sample_rate")
+    if sample_rate is not None and sample_rate < 1.0:
+        n = len(raw_dataset)
+        keep = max(1, int(n * sample_rate))
+        raw_dataset = raw_dataset.shuffle(seed=42).select(range(keep))
+        print(f"Downsampled {dataset_name}: {n} -> {keep} (rate={sample_rate})")
 
     field_map = config.get("field_map")
     preprocessor = config["preprocessor"]
