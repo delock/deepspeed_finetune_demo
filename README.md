@@ -5,6 +5,8 @@ Currently in DeepSpeedExamples, each technology has a dedicated directory to sho
 
 # How to use
 
+For environment setup (conda, dependencies, GPU config), see [LAB.md](LAB.md).
+
 To run the example, simply run:
 ```
 ./finetune.sh <NUM_GPUS> <MODEL_NAME> <DS_CONFIG>
