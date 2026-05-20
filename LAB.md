@@ -109,8 +109,8 @@ NUM_GPUS=4  # or 8
 
 python3 -c "
 import json
-for base, out_name in [('z2_moonlight_autoep_adam.json', f'z2_adam_{NUM_GPUS}gpu.json'),
-                        ('z2_moonlight_autoep_muon.json', f'z2_muon_{NUM_GPUS}gpu.json')]:
+for base, out_name in [('configs/z2_moonlight_autoep_adam.json', f'configs/z2_adam_{NUM_GPUS}gpu.json'),
+                        ('configs/z2_moonlight_autoep_muon.json', f'configs/z2_muon_{NUM_GPUS}gpu.json')]:
     with open(base) as f:
         c = json.load(f)
     c['expert_parallel']['autoep_size'] = ${NUM_GPUS}

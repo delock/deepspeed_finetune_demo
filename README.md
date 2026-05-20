@@ -12,7 +12,7 @@ To run the example, simply run:
 
 For example, if we want to run Qwen2.5-3B model with ZeRO offload on 2 GPUs, we can run:
 ```
-./finetune.sh 2 Qwen2.5-3B zo_config.json
+./finetune.sh 2 Qwen2.5-3B configs/zo_config.json
 ```
 
 ## Key arguments
@@ -58,7 +58,7 @@ deepspeed --num_gpus=8 finetune_llama.py \
   --model_name moonshotai/Moonlight-16B-A3B \
   --output_dir output_moonlight_muon \
   --batch_size 16 --max_length 512 \
-  --deepspeed_config z2_moonlight_autoep_muon.json \
+  --deepspeed_config configs/z2_moonlight_autoep_muon.json \
   --dataset_name sahil2801/CodeAlpaca-20k \
   --num_train_epochs 1
 
@@ -152,6 +152,7 @@ For quick start, some config files are added, you may also modify the config to 
 | z2_muon.json | ZeRO 2 with Muon optimizer |
 | z3_muon.json | ZeRO 3 with Muon optimizer |
 | tp_config.json | ZeRO 2 with AutoTP |
+| z2_moonlight_autoep_adam.json | Moonlight-16B-A3B with AutoEP + AdamW |
 | z2_moonlight_autoep_muon.json | Moonlight-16B-A3B with AutoEP + Muon |
 
 ## Muon optimizer config

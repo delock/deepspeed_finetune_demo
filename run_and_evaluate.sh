@@ -9,13 +9,13 @@
 #   SKIP_TRAIN  - set to 1 to skip training and go straight to eval
 #
 # Examples:
-#   bash run_and_evaluate.sh moonshotai/Moonlight-16B-A3B z2_moonlight_autoep_muon.json 100 my_run
-#   BENCHMARK=mmlu  bash run_and_evaluate.sh moonshotai/Moonlight-16B-A3B z2_moonlight_autoep_muon.json 100
-#   BENCHMARK=gsm8k bash run_and_evaluate.sh moonshotai/Moonlight-16B-A3B z2_moonlight_autoep_muon.json 100
+#   bash run_and_evaluate.sh moonshotai/Moonlight-16B-A3B configs/z2_moonlight_autoep_muon.json 100 my_run
+#   BENCHMARK=mmlu  bash run_and_evaluate.sh moonshotai/Moonlight-16B-A3B configs/z2_moonlight_autoep_muon.json 100
+#   BENCHMARK=gsm8k bash run_and_evaluate.sh moonshotai/Moonlight-16B-A3B configs/z2_moonlight_autoep_muon.json 100
 set -euo pipefail
 
 MODEL=${1:-moonshotai/Moonlight-16B-A3B}
-DS_CONFIG=${2:-z2_moonlight_autoep_muon.json}
+DS_CONFIG=${2:-configs/z2_moonlight_autoep_muon.json}
 EVAL_STEPS=${3:-100}
 WANDB_NAME=${4:-moonlight_finetune}
 TP=${TP:-8}
